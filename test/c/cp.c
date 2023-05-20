@@ -6,8 +6,8 @@
 
 int main() {
     pid_t pid;
-    char src_file[100] = "/home/masashiyoshimura/workspace/go/go_ltrace/test/c/source.txt";
-    char dest_file[100] = "/home/masashiyoshimura/workspace/go/go_ltrace/test/c/dest.txt";
+    char src_file[100];
+    char dest_file[100];
     FILE *src_fp, *dest_fp;
     int ch;
     
