@@ -80,6 +80,7 @@ type UbuntuOperation struct {
 type UbuntuCveParser struct{}
 
 func (uop *UbuntuOperation) CollectCVEs() {
+	fmt.Println("[+] Collect Ubuntu CVEs Start.")
 	files, err := ioutil.ReadDir(UBUNTU_SRC_PATH)
 	uutil.ErrFatal(err)
 	ucp := UbuntuCveParser{}
@@ -88,11 +89,11 @@ func (uop *UbuntuOperation) CollectCVEs() {
 		if strings.HasPrefix(file.Name(), "CVE") {
 			data, err := ioutil.ReadFile(UBUNTU_SRC_PATH + file.Name())
 			uutil.ErrFatal(err)
-			fmt.Println(file.Name())
 			err2 := ucp.Parse(string(data), uop)
 			uutil.ErrFatal(err2)
 		}
 	}
+	fmt.Println("[-] Collect Ubuntu CVEs End.")
 }
 
 func (ucp UbuntuCveParser) GetOneItemOnMetaData(lines []string, id *int) (string, string, error) {
@@ -111,10 +112,13 @@ func (ucp UbuntuCveParser) GetOneItemOnMetaData(lines []string, id *int) (string
 
 	*id++
 
-	for *id < len(lines) {
+	for {
 		first_colon_id := strings.Index(lines[*id], ":")
-		if first_colon_id != -1 && meta_data_item_map[lines[*id][:first_colon_id]] {
-			break
+		if first_colon_id != -1 {
+			ss := lines[*id][:first_colon_id]
+			if meta_data_item_map[ss] || (strings.HasPrefix(ss, "Patches_") || strings.HasPrefix(ss, "Tags_")) {
+				break
+			}
 		}
 		content += "\n" + lines[*id]
 		*id++
@@ -124,78 +128,66 @@ func (ucp UbuntuCveParser) GetOneItemOnMetaData(lines []string, id *int) (string
 }
 
 func (ucp UbuntuCveParser) Parse(s string, uop *UbuntuOperation) error {
-	block_re := regexp.MustCompile("\n{2,}")
-	blocks := block_re.Split(s, -1)
 
 	ubuntu_cve := UbuntuCVE{Patches: map[UbuntuPackage]PatchData{}}
+	lines := strings.Split(s, "\n")
+	patch_start_id := 0
 
 	// get meta data
 	ubuntu_cve_elems := reflect.ValueOf(&ubuntu_cve).Elem()
 	line_id := 0
-	meta_data_block_end_id := 0
 
 	for {
-		meta_data_lines := strings.Split(blocks[meta_data_block_end_id], "\n")
-		for line_id < len(meta_data_lines) {
-			// for CVE-2020-5504
-			if strings.Compare(meta_data_lines[line_id], "") == 0 {
-				line_id++
-				continue
-			}
-
-			// get the content for target_item
-			target_item, content, err := ucp.GetOneItemOnMetaData(meta_data_lines, &line_id)
-			fmt.Println(target_item)
-			uutil.ErrFatal(err)
-
-			// convert target item for UbuntuCVE field name ex.) Discovered-by -> DiscoveredBy
-			target_item_words := strings.Split(target_item, "-")
-			for i, word := range target_item_words {
-				target_item_words[i] = strings.Title(word)
-			}
-			target_item_for_elem := strings.Join(target_item_words, "")
-
-			// set target field
-			field := ubuntu_cve_elems.FieldByName(target_item_for_elem)
-			if field.IsValid() && field.CanSet() {
-				field.SetString(content)
-			} else {
-				return xerrors.Errorf("Bug: failed to ubuntu_cve_elems.FieldByName(%v)\n", target_item_for_elem)
-			}
+		// for CVE-2020-5504
+		if strings.Compare(lines[line_id], "") == 0 {
+			line_id++
+			patch_start_id++
+			continue
 		}
-		meta_data_block_end_id++
-		next_data_lines := strings.Split(blocks[meta_data_block_end_id], "\n")
 
-		// for CVE-2017-5192, CVE-2022-0194
-		start_line := 0
-		for colon_id := strings.Index(next_data_lines[start_line], ":"); colon_id == -1 || !meta_data_item_map[next_data_lines[start_line][:colon_id]]; {
-			start_line++
-			if start_line == len(next_data_lines) {
-				start_line = 0
-				meta_data_block_end_id++
-				next_data_lines = strings.Split(blocks[meta_data_block_end_id], "\n")
-			}
+		// get the content for target_item
+		target_item, content, err := ucp.GetOneItemOnMetaData(lines, &line_id)
+		uutil.ErrFatal(err)
+
+		// convert target item for UbuntuCVE field name ex.) Discovered-by -> DiscoveredBy
+		target_item_words := strings.Split(target_item, "-")
+		for i, word := range target_item_words {
+			target_item_words[i] = strings.Title(word)
 		}
-		if meta_item := next_data_lines[start_line][:strings.Index(next_data_lines[start_line], ":")]; !meta_data_item_map[meta_item] {
+		target_item_for_elem := strings.Join(target_item_words, "")
+
+		// set target field
+		field := ubuntu_cve_elems.FieldByName(target_item_for_elem)
+		if field.IsValid() && field.CanSet() {
+			field.SetString(content)
+		} else {
+			return xerrors.Errorf("Bug: failed to ubuntu_cve_elems.FieldByName(%v)\n", target_item_for_elem)
+		}
+
+		if strings.Compare(target_item, "CVSS") == 0 {
 			break
 		}
 	}
 
-	patches_block_start_id := meta_data_block_end_id
+	for i := 0; i < line_id; i++ {
+		patch_start_id += len(lines[i]) + 1 // add '\n'
+	}
+
+	block_re := regexp.MustCompile("\n{2,}")
+	patch_start_s := s[patch_start_id:]
+	patch_blocks := block_re.Split(patch_start_s, -1)
 
 	// get patches data
-	for _, block := range blocks[patches_block_start_id:] {
+	for _, block := range patch_blocks {
 		var ubuntu_package UbuntuPackage
 
 		lines := strings.Split(block, "\n")
-		fmt.Println(lines[0])
 		if strings.Index(lines[0], ":") == -1 {
 			continue
 		}
 
 		package_part := lines[0][:strings.Index(lines[0], ":")]
 		ubuntu_package.PackageName = package_part[strings.Index(package_part, "_")+1:]
-		fmt.Println(ubuntu_package.PackageName)
 
 		// get affected packages for every ubuntu version
 		for _, line := range lines[1:] {

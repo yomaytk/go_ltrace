@@ -59,7 +59,6 @@ var STRACE_OPTIONS = []string{"-o", STRACE_OUTPUT_FILE, "-s", "1000", "-f", "-e"
 var DPKG_OPTIONS = []string{"-S"}
 
 type pid_t uint32
-type ltrace_parse_t map[pid_t]map[CallFunc]bool
 
 type CallFunc struct {
 	pid  pid_t
@@ -88,16 +87,12 @@ type NvdData struct {
 	CveItems []CVEInfo `json:"CVE_Items"`
 }
 
-type PackageSet struct {
-	tp TraceParser
-}
+type Parser struct{}
 
-type TraceParser struct{}
-
-func (tp TraceParser) ltraceParse(s string) (ltrace_parse_t, map[string]bool, error) {
+func (parser Parser) LtraceParse(s string) (map[pid_t]map[CallFunc]bool, map[string]bool, error) {
 	lines := strings.Split(s, "\n")
 	no_end_func_map := make(map[CallFuncMapKey]int)
-	var pid_and_call_funcs_map = make(ltrace_parse_t)
+	var pid_and_call_funcs_map = make(map[pid_t]map[CallFunc]bool)
 	var all_call_funcs_map = make(map[string]bool)
 	for _, line := range lines[:len(lines)-1] {
 		// split by space
@@ -181,8 +176,8 @@ func (tp TraceParser) ltraceParse(s string) (ltrace_parse_t, map[string]bool, er
 	return pid_and_call_funcs_map, all_call_funcs_map, nil
 }
 
-func (tp TraceParser) straceParse(s string) (map[string]bool, error) {
-	shared_libraries_map := make(map[string]bool)
+func (parser Parser) StraceParse(s string) (map[string]bool, error) {
+	lib_map := make(map[string]bool)
 	lines := strings.Split(s, "\n")
 
 	for _, line := range lines[:len(lines)-1] {
@@ -203,45 +198,131 @@ func (tp TraceParser) straceParse(s string) (map[string]bool, error) {
 				continue
 			}
 			file_path := file_token[1 : len(file_token)-2]
-			shared_libraries_map[file_path] = true
+			lib_map[file_path] = true
 			continue
 		}
 
 		fmt.Printf("strange line: %v\n", line)
 	}
 
-	return shared_libraries_map, nil
+	return lib_map, nil
 }
 
-func (ps PackageSet) collectTargetPackages() (map[string][]string, error) {
-	content, err := os.ReadFile(STRACE_OUTPUT_FILE)
+func (parser Parser) DpkgParse(s string) (map[string][]string, error) {
+
+	lines := strings.Split(s, "\n")
+	res := map[string][]string{}
+
+	for _, line := range lines {
+
+		// unknown library
+		if strings.HasSuffix(line, "dpkg-query: no path") {
+			tokens := strings.Fields(line)
+			unknown_libs := res["unknown"]
+			unknown_libs = append(unknown_libs, tokens[len(tokens)-1])
+			res["__unknown"] = unknown_libs
+		}
+
+		// ex.) libxdmcp6:arm64: /usr/lib/aarch64-linux-gnu/libXdmcp.so.6
+		first_colon_id := strings.Index(line, ":")
+		package_name := line[:first_colon_id]
+		slash_tokens := strings.Split(line, "/")
+		if len(slash_tokens) == 1 {
+			return map[string][]string{}, xerrors.Errorf("strange dpkg result\n")
+		}
+		result_package := slash_tokens[len(slash_tokens)-1] //  -> libXdmcp.so.6
+		// don't append similar version package. ex.) libXdmcp.so.6.0.0
+		if strings.Compare(package_name, result_package) == 0 {
+			libs := res[package_name]
+			libs = append(libs, result_package)
+			res[package_name] = libs
+		} else {
+			libs := res["__similar_version"]
+			libs = append(libs, result_package)
+			res["__similar_version"] = libs
+		}
+	}
+
+	return res, nil
+}
+
+type CommandSet struct {
+	parser Parser
+}
+
+func (cmds CommandSet) DinamicallyLinked(trace_target []string) bool {
+	res, err := exec.Command(CMD_FILE, trace_target...).Output()
 	uutil.ErrFatal(err)
 
-	strace_s := string(content)
-	// strace parse
-	shared_libraries_map, err := ps.tp.straceParse(strace_s)
+	return strings.Contains(string(res), DYNAMICALLY_LINKED)
+}
 
-	var shared_libraries []string
-	for shared_library := range shared_libraries_map {
-		shared_libraries = append(shared_libraries, shared_library)
+func (cmds CommandSet) Dpkg(lib_map map[string]bool) map[string][]string {
+
+	var used_libs []string = []string{}
+	for lib := range lib_map {
+		used_libs = append(used_libs, lib)
 	}
 
-	fmt.Println(shared_libraries)
-
-	dpkg_args := append(DPKG_OPTIONS, shared_libraries...)
+	// exec dpkg
+	dpkg_args := append(DPKG_OPTIONS, used_libs...)
 	res, err := exec.Command(CMD_DPKG, dpkg_args...).Output()
+	uutil.ErrFatal(err)
 
-	// parse dpkg
-	lines := strings.Split(string(res), "\n")
-	// for _, line := range lines {
-	// 	tokens := strings.Fields(line)
+	s := string(res)
 
-	// }
-	for _, line := range lines {
-		fmt.Printf("line: %v\n", line)
-	}
+	// dpkg parse
+	package_lib_map, err2 := cmds.parser.DpkgParse(s)
+	uutil.ErrFatal(err2)
+	return package_lib_map
+}
 
-	return nil, nil
+func (cmds CommandSet) Ltrace(trace_target []string) map[string]bool {
+
+	// ltrace
+	trace_args := append(LTRACE_OPTIONS, trace_target...)
+
+	cmd_ltrace := exec.Command(CMD_LTRACE, trace_args...)
+	cmd_ltrace.Stdin = os.Stdin
+	cmd_ltrace.Stdout = os.Stdout
+
+	uutil.ErrFatal(cmd_ltrace.Start())
+	uutil.ErrFatal(cmd_ltrace.Wait())
+
+	// get ltrace output
+	content, err := os.ReadFile(LTARCE_OUTPUT_FILE)
+	uutil.ErrFatal(err)
+
+	s := string(content)
+
+	// parse
+	_, all_call_funcs_map, err := cmds.parser.LtraceParse(s)
+	uutil.ErrFatal(err)
+
+	return all_call_funcs_map
+}
+
+func (cmds CommandSet) Strace(trace_target []string) map[string]bool {
+
+	// exec strace
+	strace_args := append(STRACE_OPTIONS, trace_target...)
+	cmd_strace := exec.Command(CMD_STRACE, strace_args...)
+
+	cmd_strace.Stdin = os.Stdin
+	cmd_strace.Stdout = os.Stdout
+
+	uutil.ErrFatal(cmd_strace.Start())
+	uutil.ErrFatal(cmd_strace.Wait())
+
+	// analyze starce result
+	bytes, err := os.ReadFile(STRACE_OUTPUT_FILE)
+	uutil.ErrFatal(err)
+
+	s := string(bytes)
+	// strace parse
+	lib_map, err := cmds.parser.StraceParse(s)
+
+	return lib_map
 }
 
 func main() {
@@ -250,69 +331,17 @@ func main() {
 		panic("too few arguments.\n")
 	}
 
-	tp := TraceParser{}
+	target_args := os.Args[1:]
+	cmds := CommandSet{parser: Parser{}}
 
+	// collect Ubuntu CVE data
 	uop := ubuntu.UbuntuOperation{PackagesForQuery: map[ubuntu.UbuntuPackage]ubuntu.PackageCVEs{}, UbuntuCVEs: []ubuntu.UbuntuCVE{}}
 	uop.CollectCVEs()
 
-	// // Open the my.db data file in your current directory.
-	// // It will be created if it doesn't exist.
-	// db, err := bolt.Open("cve.db", 0600, nil)
-	// uutil.ErrFatal(err)
-	// defer db.Close()
-
-	res, err := exec.Command(CMD_FILE, os.Args[1:]...).Output()
-	uutil.ErrFatal(err)
-
-	// ltrace if target binary is dynamically linked
-	if strings.Contains(string(res), DYNAMICALLY_LINKED) {
-
-		fmt.Printf("target is dynamically linked.\n")
-		ps := PackageSet{tp: TraceParser{}}
-
-		// ltrace
-		trace_args := append(LTRACE_OPTIONS, os.Args[1:]...)
-		cmd_ltrace := exec.Command(CMD_LTRACE, trace_args...)
-
-		cmd_ltrace.Stdin = os.Stdin
-		cmd_ltrace.Stdout = os.Stdout
-
-		uutil.ErrFatal(cmd_ltrace.Start())
-		uutil.ErrFatal(cmd_ltrace.Wait())
-
-		// get ltrace output
-		content, err := os.ReadFile(LTARCE_OUTPUT_FILE)
-		uutil.ErrFatal(err)
-
-		ltrace_s := string(content)
-		// ltraceParse
-		pid_and_call_funcs_map, all_call_funcs_map, err := TraceParser.ltraceParse(tp, ltrace_s)
-		uutil.ErrFatal(err)
-
-		fmt.Println("=== trace result ===")
-		for key_pid, call_funcs_map := range pid_and_call_funcs_map {
-			fmt.Printf("[PID: %v]\n", key_pid)
-			for call_func := range call_funcs_map {
-				fmt.Println(call_func)
-			}
-		}
-		i := 0
-		for call_func := range all_call_funcs_map {
-			fmt.Printf("func_%v: %v\n", i, call_func)
-			i++
-		}
-
-		// strace
-		strace_args := append(STRACE_OPTIONS, os.Args[1:]...)
-		cmd_strace := exec.Command(CMD_STRACE, strace_args...)
-
-		cmd_strace.Stdin = os.Stdin
-		cmd_strace.Stdout = os.Stdout
-
-		uutil.ErrFatal(cmd_strace.Start())
-		uutil.ErrFatal(cmd_strace.Wait())
-
-		ps.collectTargetPackages()
+	// trace used shared libraries by "strace"
+	if cmds.DinamicallyLinked(target_args) {
+		lib_map := cmds.Strace(target_args)
+		package_lib_map := cmds.Dpkg(lib_map)
+		fmt.Println(package_lib_map)
 	}
-
 }
