@@ -177,7 +177,8 @@ func (parser Parser) LtraceParse(s string) (map[pid_t]map[CallFunc]bool, map[str
 }
 
 func (parser Parser) StraceParse(s string) (map[string]bool, error) {
-	lib_map := make(map[string]bool)
+
+	lib_map := map[string]bool{}
 	lines := strings.Split(s, "\n")
 
 	for _, line := range lines[:len(lines)-1] {
@@ -208,42 +209,45 @@ func (parser Parser) StraceParse(s string) (map[string]bool, error) {
 	return lib_map, nil
 }
 
-func (parser Parser) DpkgParse(s string) (map[string][]string, error) {
+func (parser Parser) DpkgParse(s string, package_lib_map map[string][]string) ([]string, error) {
 
 	lines := strings.Split(s, "\n")
-	res := map[string][]string{}
+	re_search_paths := []string{}
 
 	for _, line := range lines {
 
 		// unknown library
 		if strings.HasSuffix(line, "dpkg-query: no path") {
 			tokens := strings.Fields(line)
-			unknown_libs := res["unknown"]
-			unknown_libs = append(unknown_libs, tokens[len(tokens)-1])
-			res["__unknown"] = unknown_libs
+			if unknown_libs, ok := package_lib_map["__unknown"]; ok {
+				unknown_libs = append(unknown_libs, tokens[len(tokens)-1])
+				package_lib_map["__unknown"] = unknown_libs
+			} else {
+				package_lib_map["__unknown"] = []string{}
+			}
+		}
+
+		// cannot specify unit package, so search again (/lib/* -> /usr/lib/*)
+		first_comma_id := strings.Index(line, ",")
+		if first_comma_id != -1 {
+			tokens := strings.Fields(line)
+			re_search_paths = append(re_search_paths, tokens[len(tokens)-1])
 		}
 
 		// ex.) libxdmcp6:arm64: /usr/lib/aarch64-linux-gnu/libXdmcp.so.6
 		first_colon_id := strings.Index(line, ":")
 		package_name := line[:first_colon_id]
-		slash_tokens := strings.Split(line, "/")
-		if len(slash_tokens) == 1 {
-			return map[string][]string{}, xerrors.Errorf("strange dpkg result\n")
-		}
-		result_package := slash_tokens[len(slash_tokens)-1] //  -> libXdmcp.so.6
-		// don't append similar version package. ex.) libXdmcp.so.6.0.0
-		if strings.Compare(package_name, result_package) == 0 {
-			libs := res[package_name]
-			libs = append(libs, result_package)
-			res[package_name] = libs
+		tokens := strings.Fields(line)
+		target_path := tokens[len(tokens)-1]
+		if paths, ok := package_lib_map[package_name]; ok {
+			paths = append(paths, target_path)
+			package_lib_map[package_name] = paths
 		} else {
-			libs := res["__similar_version"]
-			libs = append(libs, result_package)
-			res["__similar_version"] = libs
+			package_lib_map[package_name] = []string{target_path}
 		}
 	}
 
-	return res, nil
+	return re_search_paths, nil
 }
 
 type CommandSet struct {
@@ -257,18 +261,20 @@ func (cmds CommandSet) DinamicallyLinked(trace_target []string) bool {
 	return strings.Contains(string(res), DYNAMICALLY_LINKED)
 }
 
-func (cmds CommandSet) Dpkg(lib_map map[string]bool) map[string][]string {
+func (cmds CommandSet) Dpkg(lib_map map[string]bool) (map[string][]string, error) {
 
 	fmt.Println("[+] Dpkg Start.")
 
+	package_lib_map := map[string][]string{}
 	var used_paths []string = []string{}
+	path_cache_map := map[string][]string{}
+
 	for lib := range lib_map {
 		used_paths = append(used_paths, lib)
+		path_cache_map[lib] = []string{lib}
 	}
 
 	// exec dpkg
-
-	s := ""
 	err_s := ""
 	target_paths := used_paths
 
@@ -284,14 +290,34 @@ func (cmds CommandSet) Dpkg(lib_map map[string]bool) map[string][]string {
 		cmd.Run()
 
 		// get only files dpkg can find the target package
-		s += stdout.String()
+		s := stdout.String()
+		re_search_paths, err := cmds.parser.DpkgParse(s, package_lib_map)
+		uutil.ErrFatal(err)
+
+		// add re_search_paths
+		target_paths = []string{}
+		for _, re_search_path := range re_search_paths {
+			if re_search_target_paths, ok := path_cache_map[re_search_path]; ok {
+				// /lib/... -> /usr/lib/...
+				for _, target_path := range re_search_target_paths {
+					usr_target_path := "/usr" + target_path
+					target_paths = append(target_paths, usr_target_path)
+					// update path_cache_map
+					target_original_paths := path_cache_map[target_path]
+					path_cache_map[usr_target_path] = target_original_paths
+					path_cache_map[target_path] = nil
+				}
+			} else {
+				return map[string][]string{}, xerrors.Errorf("Bug: re_search_target_paths must not be empty.\n")
+			}
+		}
 
 		// initialize used_paths
-		target_paths = []string{}
-		paths_cache := map[string]bool{}
+		multiple_path_map := map[string]bool{}
 
 		// search for path one level above
 		err_s = stderr.String()
+
 		nohit_lines := strings.Split(err_s, "\n")
 		for _, line := range nohit_lines {
 			if strings.Compare(line, "") == 0 {
@@ -300,11 +326,19 @@ func (cmds CommandSet) Dpkg(lib_map map[string]bool) map[string][]string {
 			nohit_line_tokens := strings.Fields(line)
 			nohit_path := nohit_line_tokens[len(nohit_line_tokens)-1]
 			last_slash_index := strings.LastIndex(nohit_path, "/")
-			next_path := nohit_path[:last_slash_index]
-			if len(next_path) > 0 && !paths_cache[next_path] {
-				target_paths = append(target_paths, next_path)
-				paths_cache[next_path] = true
+			if last_slash_index == -1 {
+				continue
 			}
+			next_path := nohit_path[:last_slash_index]
+			// append path one level above
+			if len(next_path) > 0 && !multiple_path_map[next_path] {
+				target_paths = append(target_paths, next_path)
+				multiple_path_map[next_path] = true
+			}
+			// update path_cache_map
+			target_original_paths := path_cache_map[nohit_path]
+			path_cache_map[next_path] = target_original_paths
+			path_cache_map[nohit_path] = nil
 		}
 
 		if len(target_paths) == 0 {
@@ -312,16 +346,9 @@ func (cmds CommandSet) Dpkg(lib_map map[string]bool) map[string][]string {
 		}
 	}
 
-	fmt.Println(s)
-	fmt.Println(err_s)
-
-	// dpkg parse
-	// package_lib_map, err2 := cmds.parser.DpkgParse(s)
-	// uutil.ErrFatal(err2)
-
 	fmt.Println("[-] Dpkg End.")
 
-	return map[string][]string{}
+	return package_lib_map, nil
 }
 
 func (cmds CommandSet) Ltrace(trace_target []string) map[string]bool {
@@ -388,7 +415,8 @@ func main() {
 	// trace used shared libraries by "strace"
 	if cmds.DinamicallyLinked(target_args) {
 		lib_map := cmds.Strace(target_args)
-		package_lib_map := cmds.Dpkg(lib_map)
+		package_lib_map, err := cmds.Dpkg(lib_map)
+		uutil.ErrFatal(err)
 		fmt.Println(package_lib_map)
 	}
 }
