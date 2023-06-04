@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,7 +9,6 @@ import (
 	"strings"
 
 	uutil "github.com/yomaytk/go_ltrace/util"
-	"github.com/yomaytk/go_ltrace/vulndb/ubuntu"
 	"golang.org/x/xerrors"
 )
 
@@ -259,29 +259,76 @@ func (cmds CommandSet) DinamicallyLinked(trace_target []string) bool {
 
 func (cmds CommandSet) Dpkg(lib_map map[string]bool) map[string][]string {
 
-	var used_libs []string = []string{}
+	fmt.Println("[+] Dpkg Start.")
+
+	var used_paths []string = []string{}
 	for lib := range lib_map {
-		used_libs = append(used_libs, lib)
+		used_paths = append(used_paths, lib)
 	}
 
 	// exec dpkg
-	dpkg_args := append(DPKG_OPTIONS, used_libs...)
-	res, err := exec.Command(CMD_DPKG, dpkg_args...).Output()
-	uutil.ErrFatal(err)
 
-	s := string(res)
+	s := ""
+	err_s := ""
+	target_paths := used_paths
+
+	for {
+
+		dpkg_args := append(DPKG_OPTIONS, target_paths...)
+		cmd := exec.Command(CMD_DPKG, dpkg_args...)
+
+		// separate stdout and stderr
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		cmd.Run()
+
+		// get only files dpkg can find the target package
+		s += stdout.String()
+
+		// initialize used_paths
+		target_paths = []string{}
+		paths_cache := map[string]bool{}
+
+		// search for path one level above
+		err_s = stderr.String()
+		nohit_lines := strings.Split(err_s, "\n")
+		for _, line := range nohit_lines {
+			if strings.Compare(line, "") == 0 {
+				continue
+			}
+			nohit_line_tokens := strings.Fields(line)
+			nohit_path := nohit_line_tokens[len(nohit_line_tokens)-1]
+			last_slash_index := strings.LastIndex(nohit_path, "/")
+			next_path := nohit_path[:last_slash_index]
+			if len(next_path) > 0 && !paths_cache[next_path] {
+				target_paths = append(target_paths, next_path)
+				paths_cache[next_path] = true
+			}
+		}
+
+		if len(target_paths) == 0 {
+			break
+		}
+	}
+
+	fmt.Println(s)
+	fmt.Println(err_s)
 
 	// dpkg parse
-	package_lib_map, err2 := cmds.parser.DpkgParse(s)
-	uutil.ErrFatal(err2)
-	return package_lib_map
+	// package_lib_map, err2 := cmds.parser.DpkgParse(s)
+	// uutil.ErrFatal(err2)
+
+	fmt.Println("[-] Dpkg End.")
+
+	return map[string][]string{}
 }
 
 func (cmds CommandSet) Ltrace(trace_target []string) map[string]bool {
 
-	// ltrace
-	trace_args := append(LTRACE_OPTIONS, trace_target...)
+	fmt.Println("[+] Ltrace Start.")
 
+	trace_args := append(LTRACE_OPTIONS, trace_target...)
 	cmd_ltrace := exec.Command(CMD_LTRACE, trace_args...)
 	cmd_ltrace.Stdin = os.Stdin
 	cmd_ltrace.Stdout = os.Stdout
@@ -299,15 +346,17 @@ func (cmds CommandSet) Ltrace(trace_target []string) map[string]bool {
 	_, all_call_funcs_map, err := cmds.parser.LtraceParse(s)
 	uutil.ErrFatal(err)
 
+	fmt.Println("[-] Ltrace End.")
+
 	return all_call_funcs_map
 }
 
 func (cmds CommandSet) Strace(trace_target []string) map[string]bool {
 
-	// exec strace
+	fmt.Println("[+] Starce Start.")
+
 	strace_args := append(STRACE_OPTIONS, trace_target...)
 	cmd_strace := exec.Command(CMD_STRACE, strace_args...)
-
 	cmd_strace.Stdin = os.Stdin
 	cmd_strace.Stdout = os.Stdout
 
@@ -322,6 +371,8 @@ func (cmds CommandSet) Strace(trace_target []string) map[string]bool {
 	// strace parse
 	lib_map, err := cmds.parser.StraceParse(s)
 
+	fmt.Println("[-] Strace End.")
+
 	return lib_map
 }
 
@@ -333,10 +384,6 @@ func main() {
 
 	target_args := os.Args[1:]
 	cmds := CommandSet{parser: Parser{}}
-
-	// collect Ubuntu CVE data
-	uop := ubuntu.UbuntuOperation{PackagesForQuery: map[ubuntu.UbuntuPackage]ubuntu.PackageCVEs{}, UbuntuCVEs: []ubuntu.UbuntuCVE{}}
-	uop.CollectCVEs()
 
 	// trace used shared libraries by "strace"
 	if cmds.DinamicallyLinked(target_args) {

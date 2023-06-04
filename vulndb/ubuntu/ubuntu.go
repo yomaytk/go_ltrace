@@ -37,7 +37,7 @@ var all_ubuntu_distrs = map[string]bool{"warty": true, "hoary": true, "breezy": 
 	"maverick": true, "Natty": true, "oneiric": true, "precise": true, "quantal": true, "raring": true, "saucy": true,
 	"trusty": true, "utopic": true, "vivid": true, "wily": true, "xenial": true, "yakkety": true, "zesty": true, "artful": true,
 	"bionic": true, "cosmic": true, "disco": true, "eoan": true, "focal": true, "groovy": true,
-	"hirsute": true, "jammy": true, "kinetic": true, "lunar": true, "devel": true}
+	"hirsute": true, "jammy": true, "kinetic": true, "impish": true, "lunar": true, "devel": true}
 
 type UbuntuPackages map[string]UbuntuPackage
 type priority_t uint8
@@ -201,13 +201,20 @@ func (ucp UbuntuCveParser) Parse(s string, uop *UbuntuOperation) error {
 
 			// read package data
 			if words_len := len(package_words); words_len == 1 {
-				// don't include "/"
-				// ex. words2: ["trusty", "seahorse"]
-				package_words2 := strings.Split(package_words[0], "_")
-				ubuntu_version = UbuntuVersion{Distr: package_words2[0], SpecialSupport: ""}
+
+				// ex.) trusty_gcc-11: DNE
+				distr := package_words[0][:strings.Index(package_words[0], "_")]
+				if !all_ubuntu_distrs[distr] {
+					return xerrors.Errorf("Bug: unknown distribution: %v\n", distr)
+				}
+				ubuntu_version = UbuntuVersion{Distr: distr, SpecialSupport: ""}
+
 			} else if words_len == 2 {
+
+				// ex.) trusty/esm_gcc-11: DNE,
+				// special support
 				package_words2 := strings.Split(package_words[1], "_")
-				// ESM support
+
 				if all_support_versions[package_words[0]] {
 					ubuntu_version = UbuntuVersion{Distr: package_words2[0], SpecialSupport: package_words[0]}
 				} else if all_ubuntu_distrs[package_words[0]] {
@@ -221,6 +228,7 @@ func (ucp UbuntuCveParser) Parse(s string, uop *UbuntuOperation) error {
 				} else {
 					return xerrors.Errorf("Bug: cannot parse special support. target: %v\n", package_words[0])
 				}
+
 			} else if words_len > 2 {
 				return xerrors.Errorf("Bug: words_len > 2 error. words: %v\n", package_words)
 			}
