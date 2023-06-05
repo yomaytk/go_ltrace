@@ -209,29 +209,31 @@ func (parser Parser) StraceParse(s string) (map[string]bool, error) {
 	return lib_map, nil
 }
 
-func (parser Parser) DpkgParse(s string, package_lib_map map[string][]string) ([]string, error) {
+func (parser Parser) DpkgParse(s string, package_lib_map map[string][]string, path_cache_map map[string][]string) ([]string, error) {
 
 	lines := strings.Split(s, "\n")
 	re_search_paths := []string{}
 
 	for _, line := range lines {
 
-		// unknown library
+		if strings.Compare(line, "") == 0 {
+			continue
+		}
+
+		// must not parse unknown library
 		if strings.HasSuffix(line, "dpkg-query: no path") {
-			tokens := strings.Fields(line)
-			if unknown_libs, ok := package_lib_map["__unknown"]; ok {
-				unknown_libs = append(unknown_libs, tokens[len(tokens)-1])
-				package_lib_map["__unknown"] = unknown_libs
-			} else {
-				package_lib_map["__unknown"] = []string{}
-			}
+			return []string{}, xerrors.Errorf("Bug: must not parse unknown library.\n")
 		}
 
 		// cannot specify unit package, so search again (/lib/* -> /usr/lib/*)
 		first_comma_id := strings.Index(line, ",")
 		if first_comma_id != -1 {
 			tokens := strings.Fields(line)
-			re_search_paths = append(re_search_paths, tokens[len(tokens)-1])
+			target_path := tokens[len(tokens)-1]
+			if strings.Compare(target_path, "/usr") != 0 && strings.Compare(target_path, "/etc") != 0 {
+				re_search_paths = append(re_search_paths, target_path)
+			}
+			continue
 		}
 
 		// ex.) libxdmcp6:arm64: /usr/lib/aarch64-linux-gnu/libXdmcp.so.6
@@ -239,11 +241,12 @@ func (parser Parser) DpkgParse(s string, package_lib_map map[string][]string) ([
 		package_name := line[:first_colon_id]
 		tokens := strings.Fields(line)
 		target_path := tokens[len(tokens)-1]
+		target_original_paths := path_cache_map[target_path]
 		if paths, ok := package_lib_map[package_name]; ok {
-			paths = append(paths, target_path)
+			paths = append(paths, target_original_paths...)
 			package_lib_map[package_name] = paths
 		} else {
-			package_lib_map[package_name] = []string{target_path}
+			package_lib_map[package_name] = target_original_paths
 		}
 	}
 
@@ -275,7 +278,6 @@ func (cmds CommandSet) Dpkg(lib_map map[string]bool) (map[string][]string, error
 	}
 
 	// exec dpkg
-	err_s := ""
 	target_paths := used_paths
 
 	for {
@@ -291,34 +293,30 @@ func (cmds CommandSet) Dpkg(lib_map map[string]bool) (map[string][]string, error
 
 		// get only files dpkg can find the target package
 		s := stdout.String()
-		re_search_paths, err := cmds.parser.DpkgParse(s, package_lib_map)
+		re_search_paths, err := cmds.parser.DpkgParse(s, package_lib_map, path_cache_map)
 		uutil.ErrFatal(err)
 
 		// add re_search_paths
 		target_paths = []string{}
 		for _, re_search_path := range re_search_paths {
-			if re_search_target_paths, ok := path_cache_map[re_search_path]; ok {
+			if re_search_original_paths, ok := path_cache_map[re_search_path]; ok {
 				// /lib/... -> /usr/lib/...
-				for _, target_path := range re_search_target_paths {
-					usr_target_path := "/usr" + target_path
-					target_paths = append(target_paths, usr_target_path)
+				for _, original_path := range re_search_original_paths {
+					usr_original_path := "/usr" + original_path
+					target_paths = append(target_paths, usr_original_path)
 					// update path_cache_map
-					target_original_paths := path_cache_map[target_path]
-					path_cache_map[usr_target_path] = target_original_paths
-					path_cache_map[target_path] = nil
+					path_cache_map[usr_original_path] = []string{original_path}
 				}
+				delete(path_cache_map, re_search_path)
 			} else {
 				return map[string][]string{}, xerrors.Errorf("Bug: re_search_target_paths must not be empty.\n")
 			}
 		}
 
-		// initialize used_paths
 		multiple_path_map := map[string]bool{}
-
-		// search for path one level above
-		err_s = stderr.String()
-
+		err_s := stderr.String()
 		nohit_lines := strings.Split(err_s, "\n")
+
 		for _, line := range nohit_lines {
 			if strings.Compare(line, "") == 0 {
 				continue
@@ -336,12 +334,18 @@ func (cmds CommandSet) Dpkg(lib_map map[string]bool) (map[string][]string, error
 				multiple_path_map[next_path] = true
 			}
 			// update path_cache_map
-			target_original_paths := path_cache_map[nohit_path]
-			path_cache_map[next_path] = target_original_paths
-			path_cache_map[nohit_path] = nil
+			nohit_original_paths := path_cache_map[nohit_path]
+			if target_original_paths, ok := path_cache_map[next_path]; ok {
+				target_original_paths = append(target_original_paths, nohit_original_paths...)
+				path_cache_map[next_path] = target_original_paths
+			} else {
+				path_cache_map[next_path] = nohit_original_paths
+			}
+			delete(path_cache_map, nohit_path)
 		}
 
 		if len(target_paths) == 0 {
+			// TODO: error for logger
 			break
 		}
 	}
@@ -417,6 +421,11 @@ func main() {
 		lib_map := cmds.Strace(target_args)
 		package_lib_map, err := cmds.Dpkg(lib_map)
 		uutil.ErrFatal(err)
-		fmt.Println(package_lib_map)
+		cnt := 0
+		for key, value := range package_lib_map {
+			cnt += len(value)
+			fmt.Printf("%v: %v\n", key, value)
+		}
+		fmt.Printf("file count: %v\n", cnt)
 	}
 }
