@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	uutil "github.com/yomaytk/go_ltrace/util"
+	"github.com/yomaytk/go_ltrace/vulndb/ubuntu"
 	"golang.org/x/xerrors"
 )
 
@@ -50,6 +51,16 @@ const (
 	CMD_DPKG = "dpkg"
 )
 
+// apt show
+const (
+	CMD_APTCACHE = "apt-cache"
+)
+
+// grep
+const (
+	CMD_GREP = "grep"
+)
+
 const (
 	CACHE_DIR = "$HOME/.cache/"
 )
@@ -57,6 +68,8 @@ const (
 var LTRACE_OPTIONS = []string{"-o", LTARCE_OUTPUT_FILE, "-f"}
 var STRACE_OPTIONS = []string{"-o", STRACE_OUTPUT_FILE, "-s", "1000", "-f", "-e", "trace=openat"}
 var DPKG_OPTIONS = []string{"-S"}
+var APTSHOW_GREP_OPTIONS = []string{"-E", "Package:|Version:|Source:"}
+var APTCACHE_OPTIONS = []string{"show"}
 
 type pid_t uint32
 
@@ -85,6 +98,12 @@ type CVEInfo struct {
 
 type NvdData struct {
 	CveItems []CVEInfo `json:"CVE_Items"`
+}
+
+type PackageDetail struct {
+	binaryp string
+	sourcep string
+	version string
 }
 
 type Parser struct{}
@@ -355,6 +374,74 @@ func (cmds CommandSet) Dpkg(lib_map map[string]bool) (map[string][]string, error
 	return package_lib_map, nil
 }
 
+func (cmds CommandSet) AptShow(package_lib_map map[string][]string) (map[PackageDetail][]string, error) {
+
+	fmt.Println("[+] AptShow Start.")
+
+	source_bin_map := map[PackageDetail][]string{}
+	package_list := []string{}
+	for key := range package_lib_map {
+		package_list = append(package_list, key)
+	}
+
+	// apt-cache show ...
+	cmd_args := append(APTCACHE_OPTIONS, package_list...)
+	out1, err := exec.Command(CMD_APTCACHE, cmd_args...).Output()
+	uutil.ErrFatal(err)
+
+	// | grep -E 'Pacakge:|Source:' ...
+	cmd2_args := APTSHOW_GREP_OPTIONS
+	cmd2 := exec.Command(CMD_GREP, cmd2_args...)
+	cmd2.Stdin = bytes.NewBuffer(out1)
+
+	var stdout, stderr bytes.Buffer
+	cmd2.Stdout = &stdout
+	cmd2.Stderr = &stderr
+	cmd2.Run()
+
+	lines := strings.Split(stdout.String(), "\n")
+	fmt.Println(stdout.String())
+	for lid := 0; lid < len(lines); {
+		pkg_dtl := PackageDetail{}
+		if strings.Compare(lines[lid], "") == 0 {
+			lid++
+			continue
+		}
+		// get package detail
+		tokens := strings.Fields(lines[lid])
+		if strings.Compare(tokens[0], "Package:") == 0 {
+			pkg_dtl.binaryp = tokens[1]
+			lid++
+			tokens2 := strings.Fields(lines[lid])
+			if strings.Compare(lines[lid], "") != 0 && strings.Compare(tokens2[0], "Version:") == 0 {
+				pkg_dtl.version = tokens2[1]
+				lid++
+			}
+			tokens3 := strings.Fields(lines[lid])
+			if strings.Compare(lines[lid], "") != 0 && strings.Compare(tokens3[0], "Source:") == 0 {
+				pkg_dtl.sourcep = tokens3[1]
+				lid++
+			}
+			tokens4 := strings.Fields(lines[lid])
+			if strings.Compare(lines[lid], "") != 0 && strings.Compare(tokens4[0], "Version:") == 0 {
+				pkg_dtl.version = tokens4[1]
+				lid++
+			}
+		} else {
+			return map[PackageDetail][]string{}, xerrors.Errorf("Bug: tokens[0]('%v') must be 'Package:'\n", tokens[0])
+		}
+		source_bin_map[pkg_dtl] = package_lib_map[pkg_dtl.binaryp]
+	}
+
+	if len(stderr.String()) > 0 {
+		fmt.Printf("AptShow Error Log: %v\n", stderr.String())
+	}
+
+	fmt.Println("[-] AptShow End.")
+
+	return source_bin_map, nil
+}
+
 func (cmds CommandSet) Ltrace(trace_target []string) map[string]bool {
 
 	fmt.Println("[+] Ltrace Start.")
@@ -409,6 +496,9 @@ func (cmds CommandSet) Strace(trace_target []string) map[string]bool {
 
 func main() {
 
+	uop := ubuntu.UbuntuOperation{CVEsForPackage: map[string][]string{}, UbuntuCVEs: []ubuntu.UbuntuCVE{}}
+	uop.CollectCVEs()
+
 	if len(os.Args) < 2 {
 		panic("too few arguments.\n")
 	}
@@ -418,14 +508,20 @@ func main() {
 
 	// trace used shared libraries by "strace"
 	if cmds.DinamicallyLinked(target_args) {
+		// exec strace to find used shared libraries
 		lib_map := cmds.Strace(target_args)
+		// exec dpkg to search the binary package for every shared library
 		package_lib_map, err := cmds.Dpkg(lib_map)
 		uutil.ErrFatal(err)
 		cnt := 0
-		for key, value := range package_lib_map {
+		fmt.Printf("Log: count of file which can be searched by 'dpkg': %v\n", cnt)
+		// exec apt-cache show to search source package for every binary package
+		source_bin_map, err := cmds.AptShow(package_lib_map)
+		uutil.ErrFatal(err)
+		fmt.Println("Log: source_bin_map")
+		for key, value := range source_bin_map {
 			cnt += len(value)
 			fmt.Printf("%v: %v\n", key, value)
 		}
-		fmt.Printf("file count: %v\n", cnt)
 	}
 }

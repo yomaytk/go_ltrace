@@ -17,7 +17,7 @@ const (
 )
 
 const (
-	UNTRIAGED priority_t = iota
+	UNTRIAGED uint8 = iota
 	NEGLIGIBLE
 	LOW
 	MEDIUM
@@ -32,52 +32,55 @@ var meta_data_item_map = map[string]bool{"PublicDateAtUSN": true, "Candidate": t
 var all_support_versions = map[string]bool{"esm": true, "esm-apps": true, "esm-infra": true,
 	"stable-phone-overlay": true, "ubuntu-core": true, "fips": true, "fips-updates": true, "ros-esm": true}
 
-var all_ubuntu_distrs = map[string]bool{"warty": true, "hoary": true, "breezy": true, "dapper": true, "edgy": true,
+var package_env = map[string]bool{"warty": true, "hoary": true, "breezy": true, "dapper": true, "edgy": true,
 	"feisty": true, "gutsy": true, "hardy": true, "intrepid": true, "jaunty": true, "karmic": true, "lucid": true,
 	"maverick": true, "Natty": true, "oneiric": true, "precise": true, "quantal": true, "raring": true, "saucy": true,
 	"trusty": true, "utopic": true, "vivid": true, "wily": true, "xenial": true, "yakkety": true, "zesty": true, "artful": true,
-	"bionic": true, "cosmic": true, "disco": true, "eoan": true, "focal": true, "groovy": true,
-	"hirsute": true, "jammy": true, "kinetic": true, "impish": true, "lunar": true, "devel": true}
+	"bionic": true, "cosmic": true, "disco": true, "eoan": true, "focal": true, "groovy": true, "natty": true,
+	"hirsute": true, "jammy": true, "kinetic": true, "impish": true, "lunar": true, "devel": true, "upstream": true}
 
-type UbuntuPackages map[string]UbuntuPackage
-type priority_t uint8
-type PatchData string
+var package_manager = map[string]bool{"snap": true}
 
 type UbuntuVersion struct {
-	Distr          string `json:"distr"`
+	Environment    string `json:"environment"`
 	SpecialSupport string `json:"special_support"`
 }
 
-type PackageCVEs struct {
-	UbuntuPackage `json:"ubuntu_package"`
-	CVEIds        []string `json:"cve_id"`
+type PatchData struct {
+	DiffURLs           []string            `json:"upstream_urls"`
+	SpecificPatchDatas []SpecificPatchData `json:"specific_patch_datas"`
+}
+
+type SpecificPatchData struct {
+	UbuntuVersion `json:"ubuntu_version"`
+	Data          string `json:"data"`
 }
 
 type UbuntuCVE struct {
 	types.CVE         `json:"CVE"`
-	PublicDateAtUSN   string                      `json:"public_date_at_usn"`
-	PublicDate        string                      `json:"public_date"`
-	References        string                      `json:"references"`
-	UbuntuDescription string                      `json:"ubuntu_description"`
-	Notes             string                      `json:"notes"`
-	Mitigation        string                      `json:"mitigation"`
-	Bugs              string                      `json:"bugs"`
-	DiscoveredBy      string                      `json:"discovered_by"`
-	AssignedTo        string                      `json:"assigned_to"`
-	Patches           map[UbuntuPackage]PatchData `json:"patches"`
+	PublicDateAtUSN   string               `json:"public_date_at_usn"`
+	PublicDate        string               `json:"public_date"`
+	References        string               `json:"references"`
+	UbuntuDescription string               `json:"ubuntu_description"`
+	Notes             string               `json:"notes"`
+	Mitigation        string               `json:"mitigation"`
+	Bugs              string               `json:"bugs"`
+	DiscoveredBy      string               `json:"discovered_by"`
+	AssignedTo        string               `json:"assigned_to"`
+	Patches           map[string]PatchData `json:"patches"`
 }
 
-type UbuntuPackage struct {
-	UbuntuVersion `json:"ubuntu_version"`
-	PackageName   string `json:"package_name"`
-}
-
-type UbuntuOperation struct {
-	PackagesForQuery map[UbuntuPackage]PackageCVEs `json:"packages_for_query"`
-	UbuntuCVEs       []UbuntuCVE                   `json:"ubuntu_cves"`
+type PackageCVERefs struct {
+	PackageName string   `json:"package_name"`
+	CVEIds      []string `json:"cve_id"`
 }
 
 type UbuntuCveParser struct{}
+
+type UbuntuOperation struct {
+	CVEsForPackage map[string][]string `json:"packages_for_query"`
+	UbuntuCVEs     []UbuntuCVE         `json:"ubuntu_cves"`
+}
 
 func (uop *UbuntuOperation) CollectCVEs() {
 	fmt.Println("[+] Collect Ubuntu CVEs Start.")
@@ -87,6 +90,7 @@ func (uop *UbuntuOperation) CollectCVEs() {
 
 	for _, file := range files {
 		if strings.HasPrefix(file.Name(), "CVE") {
+			fmt.Println(file.Name())
 			data, err := ioutil.ReadFile(UBUNTU_SRC_PATH + file.Name())
 			uutil.ErrFatal(err)
 			err2 := ucp.Parse(string(data), uop)
@@ -129,14 +133,13 @@ func (ucp UbuntuCveParser) GetOneItemOnMetaData(lines []string, id *int) (string
 
 func (ucp UbuntuCveParser) Parse(s string, uop *UbuntuOperation) error {
 
-	ubuntu_cve := UbuntuCVE{Patches: map[UbuntuPackage]PatchData{}}
+	ubuntu_cve := UbuntuCVE{Patches: map[string]PatchData{}}
 	lines := strings.Split(s, "\n")
 	patch_start_id := 0
 
 	// get meta data
 	ubuntu_cve_elems := reflect.ValueOf(&ubuntu_cve).Elem()
 	line_id := 0
-
 	for {
 		// for CVE-2020-5504
 		if strings.Compare(lines[line_id], "") == 0 {
@@ -179,35 +182,63 @@ func (ucp UbuntuCveParser) Parse(s string, uop *UbuntuOperation) error {
 
 	// get patches data
 	for _, block := range patch_blocks {
-		var ubuntu_package UbuntuPackage
+
+		patch_data := PatchData{DiffURLs: []string{}, SpecificPatchDatas: []SpecificPatchData{}}
 
 		lines := strings.Split(block, "\n")
 		if strings.Index(lines[0], ":") == -1 {
 			continue
 		}
 
-		package_part := lines[0][:strings.Index(lines[0], ":")]
-		ubuntu_package.PackageName = package_part[strings.Index(package_part, "_")+1:]
+		// get package name
+		package_name_part := lines[0][:strings.Index(lines[0], ":")]
+		package_name := package_name_part[strings.Index(package_name_part, "_")+1:]
 
 		// get affected packages for every ubuntu version
-		for _, line := range lines[1:] {
-			var ubuntu_version UbuntuVersion
-			// ex. words: ["lucid_gcc-4.1:", "ignored", "(reached", "end-of-life)"]
-			package_and_patch := strings.Fields(line)
-			if len(package_and_patch) == 0 {
-				break
+		for lid := 1; lid < len(lines); lid++ {
+
+			// ignore "Tags_...", "Priority_...", "Patches_..." in the current design
+			if strings.Compare(lines[lid], "") == 0 || strings.HasPrefix(lines[lid], "Priority_") || strings.HasPrefix(lines[lid], "Tags_") ||
+				strings.HasPrefix(lines[lid], "Patches_") {
+				continue
 			}
+
+			// get patch URLs
+			tokens := strings.Fields(lines[lid])
+			if strings.Compare(tokens[0], "upstream:") == 0 || strings.Compare(tokens[0], "vendor:") == 0 ||
+				strings.Compare(tokens[0], "suse:") == 0 || strings.Compare(tokens[0], "opensuse:") == 0 ||
+				strings.Compare(tokens[0], "debdiff:") == 0 || strings.Compare(tokens[0], "other:") == 0 ||
+				strings.Compare(tokens[0], "distro:") == 0 || strings.Compare(tokens[0], "debian:") == 0 ||
+				strings.Compare(tokens[0], "android:") == 0 || strings.Compare(tokens[0], "ubuntu:") == 0 ||
+				strings.Compare(tokens[0], "redhat:") == 0 || strings.Compare(tokens[0], "usptream:") == 0 {
+				upstream_url := tokens[1]
+				patch_data.DiffURLs = append(patch_data.DiffURLs, upstream_url)
+				continue
+			}
+
+			// ignore "break-fix" in the current design
+			if strings.HasSuffix(tokens[0], "break-fix:") {
+				continue
+			}
+
+			// ex. package_and_patch: ["lucid_gcc-4.1:", "ignored", "(reached", "end-of-life)"]
+			package_and_patch := strings.Fields(lines[lid])
 			package_words := strings.Split(package_and_patch[0], "/")
 
-			// read package data
+			// get ubuntu version
+			var ubuntu_version UbuntuVersion
 			if words_len := len(package_words); words_len == 1 {
 
 				// ex.) trusty_gcc-11: DNE
-				distr := package_words[0][:strings.Index(package_words[0], "_")]
-				if !all_ubuntu_distrs[distr] {
-					return xerrors.Errorf("Bug: unknown distribution: %v\n", distr)
+				if strings.Index(package_words[0], "_") == -1 {
+					fmt.Println(package_words)
 				}
-				ubuntu_version = UbuntuVersion{Distr: distr, SpecialSupport: ""}
+				env := package_words[0][:strings.Index(package_words[0], "_")]
+				if !package_env[env] && !package_manager[env] {
+					fmt.Println(package_words)
+					return xerrors.Errorf("Bug: unknown environment: %v\n", env)
+				}
+				ubuntu_version = UbuntuVersion{Environment: env, SpecialSupport: ""}
 
 			} else if words_len == 2 {
 
@@ -216,40 +247,36 @@ func (ucp UbuntuCveParser) Parse(s string, uop *UbuntuOperation) error {
 				package_words2 := strings.Split(package_words[1], "_")
 
 				if all_support_versions[package_words[0]] {
-					ubuntu_version = UbuntuVersion{Distr: package_words2[0], SpecialSupport: package_words[0]}
-				} else if all_ubuntu_distrs[package_words[0]] {
+					ubuntu_version = UbuntuVersion{Environment: package_words2[0], SpecialSupport: package_words[0]}
+				} else if package_env[package_words[0]] || package_manager[package_words[0]] {
 					if !all_support_versions[package_words2[0]] {
 						return xerrors.Errorf("Bug: cannot Parse specific ubuntu support.\n")
 					}
-					ubuntu_version = UbuntuVersion{Distr: package_words[0], SpecialSupport: package_words2[0]}
-				} else if strings.HasPrefix(package_words[0], "Priority") {
-					// ignore the exploitability for the specific package in current design
-					continue
+					ubuntu_version = UbuntuVersion{Environment: package_words[0], SpecialSupport: package_words2[0]}
 				} else {
 					return xerrors.Errorf("Bug: cannot parse special support. target: %v\n", package_words[0])
 				}
-
 			} else if words_len > 2 {
 				return xerrors.Errorf("Bug: words_len > 2 error. words: %v\n", package_words)
 			}
 
-			ubuntu_package.UbuntuVersion = ubuntu_version
-
-			// read patch data
+			// get patch data
 			patch_words := package_and_patch[1:]
-			patch_data := strings.Join(patch_words, " ")
-			ubuntu_cve.Patches[ubuntu_package] = PatchData(patch_data)
+			data := strings.Join(patch_words, " ")
+			specific_patch_data := SpecificPatchData{UbuntuVersion: ubuntu_version, Data: data}
+			patch_data.SpecificPatchDatas = append(patch_data.SpecificPatchDatas, specific_patch_data)
 
-			// update PackagesForQuery
-			if package_cves, ok := uop.PackagesForQuery[ubuntu_package]; !ok {
-				package_cves = PackageCVEs{UbuntuPackage: ubuntu_package, CVEIds: []string{ubuntu_cve.Candidate}}
-				uop.PackagesForQuery[ubuntu_package] = package_cves
+			// update CVEsForPackage
+			if cve_refs, ok := uop.CVEsForPackage[package_name]; ok {
+				cve_refs = append(cve_refs, ubuntu_cve.Candidate)
+				uop.CVEsForPackage[package_name] = cve_refs
 			} else {
-				package_cves.CVEIds = append(package_cves.CVEIds, ubuntu_cve.Candidate)
-				uop.PackagesForQuery[ubuntu_package] = package_cves
+				uop.CVEsForPackage[package_name] = []string{ubuntu_cve.Candidate}
 			}
-
 		}
+
+		// append patch data of the package for CVE
+		ubuntu_cve.Patches[package_name] = patch_data
 	}
 	// update UbuntuCVEs
 	uop.UbuntuCVEs = append(uop.UbuntuCVEs, ubuntu_cve)
