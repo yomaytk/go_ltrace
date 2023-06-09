@@ -9,6 +9,7 @@ import (
 
 	uutil "github.com/yomaytk/go_ltrace/util"
 	types "github.com/yomaytk/go_ltrace/vulndb"
+	"github.com/yomaytk/go_ltrace/vulndb/gitrepo"
 	"golang.org/x/xerrors"
 )
 
@@ -80,9 +81,14 @@ type UbuntuCveParser struct{}
 type UbuntuOperation struct {
 	CVEsForPackage map[string][]string `json:"packages_for_query"`
 	UbuntuCVEs     []UbuntuCVE         `json:"ubuntu_cves"`
+	gitrepo.GitOperation
 }
 
-func (uop *UbuntuOperation) CollectCVEs() {
+func NewUbuntuOperation(author_name string) *UbuntuOperation {
+	return &UbuntuOperation{CVEsForPackage: map[string][]string{}, UbuntuCVEs: []UbuntuCVE{}, GitOperation: gitrepo.NewGithubOperation(author_name)}
+}
+
+func (uop *UbuntuOperation) NewDB() {
 	fmt.Println("[+] Collect Ubuntu CVEs Start.")
 	files, err := ioutil.ReadDir(UBUNTU_SRC_PATH)
 	uutil.ErrFatal(err)
@@ -98,6 +104,7 @@ func (uop *UbuntuOperation) CollectCVEs() {
 		}
 	}
 	fmt.Println("[-] Collect Ubuntu CVEs End.")
+
 }
 
 func (ucp UbuntuCveParser) GetOneItemOnMetaData(lines []string, id *int) (string, string, error) {

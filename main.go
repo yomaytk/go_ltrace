@@ -273,7 +273,11 @@ func (parser Parser) DpkgParse(s string, package_lib_map map[string][]string, pa
 }
 
 type CommandSet struct {
-	parser Parser
+	Parser Parser
+}
+
+func NewCommandSet() *CommandSet {
+	return &CommandSet{Parser: Parser{}}
 }
 
 func (cmds CommandSet) DinamicallyLinked(trace_target []string) bool {
@@ -312,7 +316,7 @@ func (cmds CommandSet) Dpkg(lib_map map[string]bool) (map[string][]string, error
 
 		// get only files dpkg can find the target package
 		s := stdout.String()
-		re_search_paths, err := cmds.parser.DpkgParse(s, package_lib_map, path_cache_map)
+		re_search_paths, err := cmds.Parser.DpkgParse(s, package_lib_map, path_cache_map)
 		uutil.ErrFatal(err)
 
 		// add re_search_paths
@@ -461,7 +465,7 @@ func (cmds CommandSet) Ltrace(trace_target []string) map[string]bool {
 	s := string(content)
 
 	// parse
-	_, all_call_funcs_map, err := cmds.parser.LtraceParse(s)
+	_, all_call_funcs_map, err := cmds.Parser.LtraceParse(s)
 	uutil.ErrFatal(err)
 
 	fmt.Println("[-] Ltrace End.")
@@ -487,41 +491,77 @@ func (cmds CommandSet) Strace(trace_target []string) map[string]bool {
 
 	s := string(bytes)
 	// strace parse
-	lib_map, err := cmds.parser.StraceParse(s)
+	lib_map, err := cmds.Parser.StraceParse(s)
 
 	fmt.Println("[-] Strace End.")
 
 	return lib_map
 }
 
-func main() {
+type Runner struct {
+	GithubAuthorName string
+	Uop              *ubuntu.UbuntuOperation
+	Cmds             *CommandSet
+}
 
-	uop := ubuntu.UbuntuOperation{CVEsForPackage: map[string][]string{}, UbuntuCVEs: []ubuntu.UbuntuCVE{}}
-	uop.CollectCVEs()
+func NewRunner(github_author_name string) *Runner {
+	return &Runner{GithubAuthorName: github_author_name, Uop: ubuntu.NewUbuntuOperation(github_author_name), Cmds: NewCommandSet()}
+}
+
+func (runner Runner) Run(args []string) {
+
+	var ltrace, strace, new_db bool
+	for _, option := range args {
+		ltrace = ltrace || strings.Compare(option, "-ltrace") == 0
+		strace = strace || strings.Compare(option, "-strace") == 0
+		new_db = new_db || strings.Compare(option, "-newdb") == 0
+	}
+
+	// construct Init DB
+	if new_db {
+		runner.Uop.NewDB()
+	}
+
+	// trace the target program at executed time
+	if runner.Cmds.DinamicallyLinked(args) {
+
+		// using strace (trace only used shared libraries)
+		if strace {
+			// exec strace to find used shared libraries
+			lib_map := runner.Cmds.Strace(args)
+
+			// exec dpkg to search the binary package for every shared library
+			package_lib_map, err := runner.Cmds.Dpkg(lib_map)
+			uutil.ErrFatal(err)
+			cnt := 0
+			fmt.Printf("Log: count of file which can be searched by 'dpkg': %v\n", cnt)
+
+			// exec apt-cache show to search source package for every binary package
+			source_bin_map, err := runner.Cmds.AptShow(package_lib_map)
+			uutil.ErrFatal(err)
+			fmt.Println("Log: source_bin_map")
+			for key, value := range source_bin_map {
+				cnt += len(value)
+				fmt.Printf("%v: %v\n", key, value)
+			}
+		}
+
+		// using ltrace (trace coverage of shared libraries)
+		if ltrace {
+			// TODO
+		}
+
+	}
+
+}
+
+func main() {
 
 	if len(os.Args) < 2 {
 		panic("too few arguments.\n")
 	}
 
-	target_args := os.Args[1:]
-	cmds := CommandSet{parser: Parser{}}
+	runner := NewRunner("yomaytk")
 
-	// trace used shared libraries by "strace"
-	if cmds.DinamicallyLinked(target_args) {
-		// exec strace to find used shared libraries
-		lib_map := cmds.Strace(target_args)
-		// exec dpkg to search the binary package for every shared library
-		package_lib_map, err := cmds.Dpkg(lib_map)
-		uutil.ErrFatal(err)
-		cnt := 0
-		fmt.Printf("Log: count of file which can be searched by 'dpkg': %v\n", cnt)
-		// exec apt-cache show to search source package for every binary package
-		source_bin_map, err := cmds.AptShow(package_lib_map)
-		uutil.ErrFatal(err)
-		fmt.Println("Log: source_bin_map")
-		for key, value := range source_bin_map {
-			cnt += len(value)
-			fmt.Printf("%v: %v\n", key, value)
-		}
-	}
+	runner.Run(os.Args[1:])
 }
