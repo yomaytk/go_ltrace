@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/joho/godotenv"
+	log "github.com/yomaytk/go_ltrace/log"
+	ttypes "github.com/yomaytk/go_ltrace/types"
 	uutil "github.com/yomaytk/go_ltrace/util"
 	"github.com/yomaytk/go_ltrace/vulndb/ubuntu"
 	"golang.org/x/xerrors"
@@ -62,6 +65,10 @@ const (
 )
 
 const (
+	CMD_LSB_RELEASE = "lsb_release"
+)
+
+const (
 	CACHE_DIR = "$HOME/.cache/"
 )
 
@@ -70,6 +77,7 @@ var STRACE_OPTIONS = []string{"-o", STRACE_OUTPUT_FILE, "-s", "1000", "-f", "-e"
 var DPKG_OPTIONS = []string{"-S"}
 var APTSHOW_GREP_OPTIONS = []string{"-E", "Package:|Version:|Source:"}
 var APTCACHE_OPTIONS = []string{"show"}
+var LSB_RELEASE_OPTIONS = []string{"-a"}
 
 type pid_t uint32
 
@@ -81,29 +89,6 @@ type CallFunc struct {
 type CallFuncMapKey struct {
 	pid  pid_t
 	symn string
-}
-
-type CVEInfo struct {
-	CveDataMeta struct {
-		ID       string `json:"ID"`
-		Assigner string `json:"ASSIGNER"`
-	} `json:"CVE_data_meta"`
-	Description struct {
-		DescriptionData []struct {
-			Lang  string `json:"lang"`
-			Value string `json:"value"`
-		} `json:"description_data"`
-	} `json:"description"`
-}
-
-type NvdData struct {
-	CveItems []CVEInfo `json:"CVE_Items"`
-}
-
-type PackageDetail struct {
-	binaryp string
-	sourcep string
-	version string
 }
 
 type Parser struct{}
@@ -133,7 +118,7 @@ func (parser Parser) LtraceParse(s string) (map[pid_t]map[CallFunc]bool, map[str
 			symn = tokens[2]
 			key := CallFuncMapKey{pid: pid, symn: symn}
 			if _, exist := no_end_func_map[key]; !exist {
-				fmt.Printf("WARNING: no_end_func_map should have the key of \"%v\".\n", symn)
+				log.Logger.Infoln("WARNING: no_end_func_map should have the key of \"%v\".", symn)
 			} else {
 				// delete target key
 				delete(no_end_func_map, key)
@@ -222,7 +207,7 @@ func (parser Parser) StraceParse(s string) (map[string]bool, error) {
 			continue
 		}
 
-		fmt.Printf("strange line: %v\n", line)
+		log.Logger.Infoln("strange line: %v", line)
 	}
 
 	return lib_map, nil
@@ -273,11 +258,28 @@ func (parser Parser) DpkgParse(s string, package_lib_map map[string][]string, pa
 }
 
 type CommandSet struct {
-	Parser Parser
+	OsVersion string
+	Parser    Parser
 }
 
 func NewCommandSet() *CommandSet {
-	return &CommandSet{Parser: Parser{}}
+	cmds := &CommandSet{Parser: Parser{}}
+	cmds.getOsVersion()
+	return cmds
+}
+
+func (cmds *CommandSet) getOsVersion() {
+
+	out, err := exec.Command(CMD_LSB_RELEASE, LSB_RELEASE_OPTIONS...).Output()
+	uutil.ErrFatal(err)
+
+	lines := strings.Split(string(out), "\n")
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Codename:") {
+			cmds.OsVersion = strings.Fields(line)[1]
+		}
+	}
 }
 
 func (cmds CommandSet) DinamicallyLinked(trace_target []string) bool {
@@ -378,11 +380,11 @@ func (cmds CommandSet) Dpkg(lib_map map[string]bool) (map[string][]string, error
 	return package_lib_map, nil
 }
 
-func (cmds CommandSet) AptShow(package_lib_map map[string][]string) (map[PackageDetail][]string, error) {
+func (cmds CommandSet) AptShow(package_lib_map map[string][]string) (map[ttypes.PackageDetail][]string, error) {
 
 	fmt.Println("[+] AptShow Start.")
 
-	source_bin_map := map[PackageDetail][]string{}
+	src_bin_map := map[ttypes.PackageDetail][]string{}
 	package_list := []string{}
 	for key := range package_lib_map {
 		package_list = append(package_list, key)
@@ -404,9 +406,9 @@ func (cmds CommandSet) AptShow(package_lib_map map[string][]string) (map[Package
 	cmd2.Run()
 
 	lines := strings.Split(stdout.String(), "\n")
-	fmt.Println(stdout.String())
+
 	for lid := 0; lid < len(lines); {
-		pkg_dtl := PackageDetail{}
+		pkg_dtl := ttypes.PackageDetail{}
 		if strings.Compare(lines[lid], "") == 0 {
 			lid++
 			continue
@@ -414,36 +416,37 @@ func (cmds CommandSet) AptShow(package_lib_map map[string][]string) (map[Package
 		// get package detail
 		tokens := strings.Fields(lines[lid])
 		if strings.Compare(tokens[0], "Package:") == 0 {
-			pkg_dtl.binaryp = tokens[1]
+			pkg_dtl.Binaryp = tokens[1]
+			pkg_dtl.Sourcep = pkg_dtl.Binaryp
 			lid++
 			tokens2 := strings.Fields(lines[lid])
 			if strings.Compare(lines[lid], "") != 0 && strings.Compare(tokens2[0], "Version:") == 0 {
-				pkg_dtl.version = tokens2[1]
+				pkg_dtl.Version = tokens2[1]
 				lid++
 			}
 			tokens3 := strings.Fields(lines[lid])
 			if strings.Compare(lines[lid], "") != 0 && strings.Compare(tokens3[0], "Source:") == 0 {
-				pkg_dtl.sourcep = tokens3[1]
+				pkg_dtl.Sourcep = tokens3[1]
 				lid++
 			}
 			tokens4 := strings.Fields(lines[lid])
 			if strings.Compare(lines[lid], "") != 0 && strings.Compare(tokens4[0], "Version:") == 0 {
-				pkg_dtl.version = tokens4[1]
+				pkg_dtl.Version = tokens4[1]
 				lid++
 			}
 		} else {
-			return map[PackageDetail][]string{}, xerrors.Errorf("Bug: tokens[0]('%v') must be 'Package:'\n", tokens[0])
+			return map[ttypes.PackageDetail][]string{}, xerrors.Errorf("Bug: tokens[0]('%v') must be 'Package:'\n", tokens[0])
 		}
-		source_bin_map[pkg_dtl] = package_lib_map[pkg_dtl.binaryp]
+		src_bin_map[pkg_dtl] = package_lib_map[pkg_dtl.Binaryp]
 	}
 
 	if len(stderr.String()) > 0 {
-		fmt.Printf("AptShow Error Log: %v\n", stderr.String())
+		log.Logger.Infoln("AptShow Error Log: %v", stderr.String())
 	}
 
 	fmt.Println("[-] AptShow End.")
 
-	return source_bin_map, nil
+	return src_bin_map, nil
 }
 
 func (cmds CommandSet) Ltrace(trace_target []string) map[string]bool {
@@ -499,50 +502,57 @@ func (cmds CommandSet) Strace(trace_target []string) map[string]bool {
 }
 
 type Runner struct {
-	GithubAuthorName string
-	Uop              *ubuntu.UbuntuOperation
-	Cmds             *CommandSet
+	Uop  *ubuntu.UbuntuOperation
+	Cmds *CommandSet
 }
 
 func NewRunner(github_author_name string) *Runner {
-	return &Runner{GithubAuthorName: github_author_name, Uop: ubuntu.NewUbuntuOperation(github_author_name), Cmds: NewCommandSet()}
+	cmds := NewCommandSet()
+	return &Runner{Uop: ubuntu.NewUbuntuOperation(github_author_name, cmds.OsVersion), Cmds: cmds}
 }
 
-func (runner Runner) Run(args []string) {
+func (runner Runner) Run(target_args []string) {
 
 	var ltrace, strace, new_db bool
-	for _, option := range args {
-		ltrace = ltrace || strings.Compare(option, "-ltrace") == 0
-		strace = strace || strings.Compare(option, "-strace") == 0
-		new_db = new_db || strings.Compare(option, "-newdb") == 0
-	}
+	ltrace = strings.Compare(os.Getenv("GOSCAN_LTRACE"), "on") == 0
+	strace = strings.Compare(os.Getenv("GOSCAN_STRACE"), "on") == 0
+	new_db = strings.Compare(os.Getenv("GOSCAN_NEWDB"), "on") == 0
 
-	// construct Init DB
+	// construct Initial DB
 	if new_db {
 		runner.Uop.NewDB()
 	}
 
 	// trace the target program at executed time
-	if runner.Cmds.DinamicallyLinked(args) {
+	if runner.Cmds.DinamicallyLinked(target_args) {
 
 		// using strace (trace only used shared libraries)
 		if strace {
 			// exec strace to find used shared libraries
-			lib_map := runner.Cmds.Strace(args)
+			lib_map := runner.Cmds.Strace(target_args)
 
 			// exec dpkg to search the binary package for every shared library
 			package_lib_map, err := runner.Cmds.Dpkg(lib_map)
 			uutil.ErrFatal(err)
-			cnt := 0
-			fmt.Printf("Log: count of file which can be searched by 'dpkg': %v\n", cnt)
 
 			// exec apt-cache show to search source package for every binary package
-			source_bin_map, err := runner.Cmds.AptShow(package_lib_map)
+			src_bin_map, err := runner.Cmds.AptShow(package_lib_map)
 			uutil.ErrFatal(err)
-			fmt.Println("Log: source_bin_map")
-			for key, value := range source_bin_map {
-				cnt += len(value)
-				fmt.Printf("%v: %v\n", key, value)
+			log.Logger.Infoln("Log: src_bin_map", src_bin_map)
+			for key, value := range src_bin_map {
+				log.Logger.Infoln("%v: %v", key, value)
+			}
+
+			// get target CVEs
+			exploitable_cves, err2 := runner.Uop.GetCVEs(src_bin_map)
+			uutil.ErrFatal(err2)
+
+			for sourcep, cves := range exploitable_cves {
+				fmt.Printf("sourcep: %v\n", sourcep)
+				for _, cve := range cves {
+					fmt.Printf("%v ", cve.Candidate)
+				}
+				fmt.Printf("\n")
 			}
 		}
 
@@ -557,11 +567,19 @@ func (runner Runner) Run(args []string) {
 
 func main() {
 
+	// setting env var
+	err := godotenv.Load()
+	uutil.ErrFatal(err)
+
+	// initialize logger
+	log.InitLogger()
+	defer log.Logger.Sync()
+
 	if len(os.Args) < 2 {
 		panic("too few arguments.\n")
 	}
 
+	// run main process
 	runner := NewRunner("yomaytk")
-
 	runner.Run(os.Args[1:])
 }

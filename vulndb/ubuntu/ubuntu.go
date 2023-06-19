@@ -3,30 +3,30 @@ package ubuntu
 import (
 	"fmt"
 	"io/ioutil"
+	"os"
 	"reflect"
 	"regexp"
 	"strings"
 
+	jsoniter "github.com/json-iterator/go"
+
+	log "github.com/yomaytk/go_ltrace/log"
+	ttypes "github.com/yomaytk/go_ltrace/types"
 	uutil "github.com/yomaytk/go_ltrace/util"
 	types "github.com/yomaytk/go_ltrace/vulndb"
-	"github.com/yomaytk/go_ltrace/vulndb/gitrepo"
+	git "github.com/yomaytk/go_ltrace/vulndb/gitrepo"
+	"go.etcd.io/bbolt"
 	"golang.org/x/xerrors"
 )
 
 const (
-	UBUNTU_SRC_PATH = "vulnsrc/ubuntu/ubuntu-cve-tracker/active/"
+	UBUNTU_SRC_PATH   = "vulnsrc/ubuntu/ubuntu-cve-tracker/active/"
+	VULNDB            = "./cache/VulnDB"
+	CVE_TABLE         = "UbuntuCVE"
+	CVE_PACKAGE_TABLE = "CVEForPackage"
 )
 
-const (
-	UNTRIAGED uint8 = iota
-	NEGLIGIBLE
-	LOW
-	MEDIUM
-	HIGH
-	CRITICAL
-)
-
-var meta_data_item_map = map[string]bool{"PublicDateAtUSN": true, "Candidate": true, "PublicDate": true, "References": true,
+var meta_data_item_map = map[string]bool{"PublicDateAtUSN": true, "Candidate": true, "PublicDate": true, "CRD": true, "References": true,
 	"Description": true, "Ubuntu-Description": true, "Notes": true, "Mitigation": true, "Bugs": true, "Priority": true,
 	"Discovered-by": true, "Assigned-to": true, "CVSS": true}
 
@@ -42,25 +42,27 @@ var package_env = map[string]bool{"warty": true, "hoary": true, "breezy": true, 
 
 var package_manager = map[string]bool{"snap": true}
 
-type UbuntuVersion struct {
-	Environment    string `json:"environment"`
-	SpecialSupport string `json:"special_support"`
+type UbuntuVersion string // os_version@special_support
+
+func NewUbuntuVersion(os_version string, special_support string) UbuntuVersion {
+	return UbuntuVersion(os_version + "@" + special_support)
 }
 
 type PatchData struct {
-	DiffURLs           []string            `json:"upstream_urls"`
-	SpecificPatchDatas []SpecificPatchData `json:"specific_patch_datas"`
+	DiffURLs           []string                            `json:"upstream_urls"`
+	SpecificPatchDatas map[UbuntuVersion]SpecificPatchData `json:"specific_patch_datas"`
 }
 
 type SpecificPatchData struct {
-	UbuntuVersion `json:"ubuntu_version"`
-	Data          string `json:"data"`
+	Affected string `json:"affected"`
+	SubInfo  string `json:"sub_info"`
 }
 
 type UbuntuCVE struct {
 	types.CVE         `json:"CVE"`
 	PublicDateAtUSN   string               `json:"public_date_at_usn"`
 	PublicDate        string               `json:"public_date"`
+	CRD               string               `json:"crd"`
 	References        string               `json:"references"`
 	UbuntuDescription string               `json:"ubuntu_description"`
 	Notes             string               `json:"notes"`
@@ -68,7 +70,7 @@ type UbuntuCVE struct {
 	Bugs              string               `json:"bugs"`
 	DiscoveredBy      string               `json:"discovered_by"`
 	AssignedTo        string               `json:"assigned_to"`
-	Patches           map[string]PatchData `json:"patches"`
+	Patches           map[string]PatchData `json:"patches"` // map[package_name]PatchData
 }
 
 type PackageCVERefs struct {
@@ -76,38 +78,263 @@ type PackageCVERefs struct {
 	CVEIds      []string `json:"cve_id"`
 }
 
-type UbuntuCveParser struct{}
+type CVEParser struct{}
 
 type UbuntuOperation struct {
+	OsVersion string
+	*DBOperation
+	*QueryOperation
+}
+
+func NewUbuntuOperation(author_name string, os_version string) *UbuntuOperation {
+	return &UbuntuOperation{OsVersion: os_version, DBOperation: NewDBOperation(author_name), QueryOperation: NewQueryOperation(os_version)}
+}
+
+func (uop *UbuntuOperation) GetCVEs(src_bin_map map[ttypes.PackageDetail][]string) (map[string][]UbuntuCVE, error) {
+	src_cves_map := uop.QueryOperation.GetTargetCVEs(src_bin_map)
+	exploitable_cves, err := uop.QueryOperation.GetCVEExploitability(src_bin_map, src_cves_map)
+	uutil.ErrFatal(err)
+	return exploitable_cves, nil
+}
+
+type QueryOperation struct {
+	OsVersion    string
+	GitOperation git.GitOperation
+}
+
+func NewQueryOperation(os_version string) *QueryOperation {
+	return &QueryOperation{OsVersion: os_version, GitOperation: git.NewGithubOperation(os.Getenv("GITHUB_AUTHOR"))}
+}
+
+func (qop *QueryOperation) GetTargetCVEs(src_bin_map map[ttypes.PackageDetail][]string) map[ttypes.PackageDetail][]UbuntuCVE {
+
+	src_cves_map := map[ttypes.PackageDetail][]UbuntuCVE{}
+	db, err := bbolt.Open(VULNDB, 0600, nil)
+	uutil.ErrFatal(err)
+	json := jsoniter.ConfigCompatibleWithStandardLibrary
+
+	// get target CVEs for every source package
+	src_and_cveids := map[ttypes.PackageDetail][]string{}
+	err = db.View(func(tx *bbolt.Tx) error {
+
+		b := tx.Bucket([]byte(CVE_PACKAGE_TABLE))
+		if b == nil {
+			return xerrors.Errorf("Cannot find %v.\n", CVE_PACKAGE_TABLE)
+		}
+
+		for key := range src_bin_map {
+			// get target cve ids
+			var cveids []string
+			data := b.Get([]byte(key.Sourcep))
+			if data == nil {
+				log.Logger.Infoln("%v don't have vulnelability.\n", key.Sourcep)
+				continue
+			}
+			err := json.Unmarshal(data, &cveids)
+			uutil.ErrFatal(err)
+			src_and_cveids[key] = cveids
+		}
+
+		return nil
+	})
+	uutil.ErrFatal(err)
+
+	// get target cves
+	for src, cveids := range src_and_cveids {
+		err := db.View(func(tx *bbolt.Tx) error {
+
+			b := tx.Bucket([]byte(CVE_TABLE))
+			if b == nil {
+				return xerrors.Errorf("Cannot find %v. second \n", CVE_PACKAGE_TABLE)
+			}
+
+			cves := []UbuntuCVE{}
+			// get CVEs for every target package
+			for _, cveid := range cveids {
+				var cve UbuntuCVE
+				data := b.Get([]byte(cveid))
+				err := json.Unmarshal(data, &cve)
+				uutil.ErrFatal(err)
+				cves = append(cves, cve)
+			}
+			src_cves_map[src] = cves
+
+			return nil
+		})
+		uutil.ErrFatal(err)
+	}
+
+	return src_cves_map
+}
+
+func (qop *QueryOperation) GetCVEExploitability(src_bin_map map[ttypes.PackageDetail][]string, src_cves_map map[ttypes.PackageDetail][]UbuntuCVE) (map[string][]UbuntuCVE, error) {
+
+	fmt.Println("[+] GetCVEExploitability Start.")
+
+	// key: sourcep, value: ubuntu_cves
+	exploitable_cves := map[string][]UbuntuCVE{}
+
+	// key: sourcep, value: shared_libraries
+	src_files_map := map[string][]string{}
+	for package_detail, target_files := range src_bin_map {
+		if files, ok := src_files_map[package_detail.Sourcep]; ok {
+			files = append(files, target_files...)
+			src_files_map[package_detail.Sourcep] = files
+		} else {
+			src_files_map[package_detail.Sourcep] = target_files
+		}
+	}
+
+	for package_detail, cves := range src_cves_map {
+
+		sourcep := package_detail.Sourcep
+		// ignore ESM support in current design
+		ubuntu_version := NewUbuntuVersion(qop.OsVersion, "")
+
+		for _, cve := range cves {
+			target_patches := cve.Patches[sourcep]
+			// the patch for target OsVersion doesn't exist.
+			var specific_patch_data SpecificPatchData
+			if value, ok := target_patches.SpecificPatchDatas[ubuntu_version]; ok {
+				specific_patch_data = value
+			} else {
+				continue
+			}
+			affected := specific_patch_data.Affected
+			// this cve is not affected
+			if strings.Compare(affected, "DNE") == 0 || strings.Compare(affected, "not-affected") == 0 {
+				continue
+			}
+			// if patch is not public, we consider this cve is affected
+			if len(target_patches.DiffURLs) == 0 {
+				if ex_cves, ok := exploitable_cves[sourcep]; ok {
+					ex_cves = append(ex_cves, cve)
+					exploitable_cves[sourcep] = ex_cves
+				} else {
+					exploitable_cves[sourcep] = []UbuntuCVE{cve}
+				}
+				continue
+			}
+			// get the fixed files of patch
+			fixed_files := map[string]bool{}
+			for _, diff_url := range target_patches.DiffURLs {
+				if strings.Contains(diff_url, "github.com") {
+					new_fixed_files, err := qop.GitOperation.GetFixedFiles(diff_url)
+					for new_fixed_file, _ := range new_fixed_files {
+						fixed_files[new_fixed_file] = true
+					}
+					uutil.ErrFatal(err)
+					log.Logger.Infoln("source: %v", sourcep)
+					log.Logger.Infow("fixed_files", fixed_files)
+				}
+			}
+			// compare the used files to fixed files
+			used_files := src_files_map[sourcep]
+			for _, used_file := range used_files {
+				for fixed_file, _ := range fixed_files {
+					// used file is fixed
+					if strings.Contains(used_file, fixed_file) {
+						if cves, ok := exploitable_cves[sourcep]; ok {
+							cves = append(cves, cve)
+							exploitable_cves[sourcep] = cves
+						} else {
+							exploitable_cves[sourcep] = []UbuntuCVE{cve}
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	fmt.Println("[+] GetCVEExploitability End.")
+
+	return exploitable_cves, nil
+}
+
+type DBOperation struct {
 	CVEsForPackage map[string][]string `json:"packages_for_query"`
 	UbuntuCVEs     []UbuntuCVE         `json:"ubuntu_cves"`
-	gitrepo.GitOperation
 }
 
-func NewUbuntuOperation(author_name string) *UbuntuOperation {
-	return &UbuntuOperation{CVEsForPackage: map[string][]string{}, UbuntuCVEs: []UbuntuCVE{}, GitOperation: gitrepo.NewGithubOperation(author_name)}
+func NewDBOperation(author_name string) *DBOperation {
+	return &DBOperation{CVEsForPackage: map[string][]string{}, UbuntuCVEs: []UbuntuCVE{}}
 }
 
-func (uop *UbuntuOperation) NewDB() {
+func (uop *DBOperation) CollectCVEs() {
+
 	fmt.Println("[+] Collect Ubuntu CVEs Start.")
 	files, err := ioutil.ReadDir(UBUNTU_SRC_PATH)
 	uutil.ErrFatal(err)
-	ucp := UbuntuCveParser{}
+	ucp := CVEParser{}
 
 	for _, file := range files {
 		if strings.HasPrefix(file.Name(), "CVE") {
-			fmt.Println(file.Name())
 			data, err := ioutil.ReadFile(UBUNTU_SRC_PATH + file.Name())
 			uutil.ErrFatal(err)
 			err2 := ucp.Parse(string(data), uop)
 			uutil.ErrFatal(err2)
 		}
 	}
-	fmt.Println("[-] Collect Ubuntu CVEs End.")
 
+	fmt.Println("[-] Collect Ubuntu CVEs End.")
 }
 
-func (ucp UbuntuCveParser) GetOneItemOnMetaData(lines []string, id *int) (string, string, error) {
+func (uop *DBOperation) NewDB() {
+
+	fmt.Println("[+] Ubuntu NewDB Start.")
+	json := jsoniter.ConfigCompatibleWithStandardLibrary
+
+	// collect CVE information from ubuntu-cve-tracker
+	uop.CollectCVEs()
+
+	db, err := bbolt.Open(VULNDB, 0600, nil)
+	uutil.ErrFatal(err)
+	defer db.Close()
+
+	// save all Ubuntu CVE
+	err = db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(CVE_TABLE))
+		uutil.ErrFatal(err)
+
+		for _, ubuntu_cve := range uop.UbuntuCVEs {
+
+			// key and value
+			key := ubuntu_cve.Candidate
+			bytes, err := json.Marshal(ubuntu_cve)
+			uutil.ErrFatal(err)
+
+			// save
+			err = b.Put([]byte(key), bytes)
+			uutil.ErrFatal(err)
+		}
+
+		return nil
+	})
+
+	// save CVE ids for every package
+	err = db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(CVE_PACKAGE_TABLE))
+		uutil.ErrFatal(err)
+
+		for key, value := range uop.CVEsForPackage {
+
+			// value
+			bytes, err := json.Marshal(value)
+			uutil.ErrFatal(err)
+
+			// save
+			err = b.Put([]byte(key), bytes)
+			uutil.ErrFatal(err)
+		}
+
+		return nil
+	})
+
+	fmt.Println("[-] Ubuntu NewDB End.")
+}
+
+func (ucp CVEParser) GetOneItemOnMetaData(lines []string, id *int) (string, string, error) {
 	content := ""
 	colon_id := strings.Index(lines[*id], ":")
 	target_item := lines[*id][:colon_id]
@@ -138,7 +365,7 @@ func (ucp UbuntuCveParser) GetOneItemOnMetaData(lines []string, id *int) (string
 	return target_item, content, nil
 }
 
-func (ucp UbuntuCveParser) Parse(s string, uop *UbuntuOperation) error {
+func (ucp CVEParser) Parse(s string, uop *DBOperation) error {
 
 	ubuntu_cve := UbuntuCVE{Patches: map[string]PatchData{}}
 	lines := strings.Split(s, "\n")
@@ -190,7 +417,7 @@ func (ucp UbuntuCveParser) Parse(s string, uop *UbuntuOperation) error {
 	// get patches data
 	for _, block := range patch_blocks {
 
-		patch_data := PatchData{DiffURLs: []string{}, SpecificPatchDatas: []SpecificPatchData{}}
+		patch_data := PatchData{DiffURLs: []string{}, SpecificPatchDatas: map[UbuntuVersion]SpecificPatchData{}}
 
 		lines := strings.Split(block, "\n")
 		if strings.Index(lines[0], ":") == -1 {
@@ -238,14 +465,15 @@ func (ucp UbuntuCveParser) Parse(s string, uop *UbuntuOperation) error {
 
 				// ex.) trusty_gcc-11: DNE
 				if strings.Index(package_words[0], "_") == -1 {
-					fmt.Println(package_words)
+					log.Logger.Infoln(package_words)
+					return xerrors.Errorf("Bug: unknown package words pattern: %v\n", package_words)
 				}
 				env := package_words[0][:strings.Index(package_words[0], "_")]
 				if !package_env[env] && !package_manager[env] {
-					fmt.Println(package_words)
+					log.Logger.Infoln(package_words)
 					return xerrors.Errorf("Bug: unknown environment: %v\n", env)
 				}
-				ubuntu_version = UbuntuVersion{Environment: env, SpecialSupport: ""}
+				ubuntu_version = NewUbuntuVersion(env, "")
 
 			} else if words_len == 2 {
 
@@ -254,12 +482,12 @@ func (ucp UbuntuCveParser) Parse(s string, uop *UbuntuOperation) error {
 				package_words2 := strings.Split(package_words[1], "_")
 
 				if all_support_versions[package_words[0]] {
-					ubuntu_version = UbuntuVersion{Environment: package_words2[0], SpecialSupport: package_words[0]}
+					ubuntu_version = NewUbuntuVersion(package_words2[0], package_words[0])
 				} else if package_env[package_words[0]] || package_manager[package_words[0]] {
 					if !all_support_versions[package_words2[0]] {
 						return xerrors.Errorf("Bug: cannot Parse specific ubuntu support.\n")
 					}
-					ubuntu_version = UbuntuVersion{Environment: package_words[0], SpecialSupport: package_words2[0]}
+					ubuntu_version = NewUbuntuVersion(package_words[0], package_words2[0])
 				} else {
 					return xerrors.Errorf("Bug: cannot parse special support. target: %v\n", package_words[0])
 				}
@@ -269,17 +497,25 @@ func (ucp UbuntuCveParser) Parse(s string, uop *UbuntuOperation) error {
 
 			// get patch data
 			patch_words := package_and_patch[1:]
-			data := strings.Join(patch_words, " ")
-			specific_patch_data := SpecificPatchData{UbuntuVersion: ubuntu_version, Data: data}
-			patch_data.SpecificPatchDatas = append(patch_data.SpecificPatchDatas, specific_patch_data)
-
-			// update CVEsForPackage
-			if cve_refs, ok := uop.CVEsForPackage[package_name]; ok {
-				cve_refs = append(cve_refs, ubuntu_cve.Candidate)
-				uop.CVEsForPackage[package_name] = cve_refs
-			} else {
-				uop.CVEsForPackage[package_name] = []string{ubuntu_cve.Candidate}
+			var specific_patch_data SpecificPatchData
+			switch {
+			case len(patch_words) == 0:
+				specific_patch_data = SpecificPatchData{Affected: "", SubInfo: ""}
+			case len(patch_words) == 1:
+				specific_patch_data = SpecificPatchData{Affected: patch_words[0], SubInfo: ""}
+			case len(patch_words) > 1:
+				sub_info := strings.Join(patch_words[1:], " ")
+				specific_patch_data = SpecificPatchData{Affected: patch_words[0], SubInfo: sub_info}
 			}
+			patch_data.SpecificPatchDatas[ubuntu_version] = specific_patch_data
+		}
+
+		// update CVEsForPackage
+		if cve_refs, ok := uop.CVEsForPackage[package_name]; ok {
+			cve_refs = append(cve_refs, ubuntu_cve.Candidate)
+			uop.CVEsForPackage[package_name] = cve_refs
+		} else {
+			uop.CVEsForPackage[package_name] = []string{ubuntu_cve.Candidate}
 		}
 
 		// append patch data of the package for CVE
