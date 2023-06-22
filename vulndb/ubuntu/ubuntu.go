@@ -3,7 +3,6 @@ package ubuntu
 import (
 	"fmt"
 	"io/ioutil"
-	"os"
 	"reflect"
 	"regexp"
 	"strings"
@@ -98,12 +97,12 @@ func (uop *UbuntuOperation) GetCVEs(src_bin_map map[ttypes.PackageDetail][]strin
 }
 
 type QueryOperation struct {
-	OsVersion    string
-	GitOperation git.GitOperation
+	OsVersion       string
+	GithubOperation *git.GithubOperation
 }
 
 func NewQueryOperation(os_version string) *QueryOperation {
-	return &QueryOperation{OsVersion: os_version, GitOperation: git.NewGithubOperation(os.Getenv("GITHUB_AUTHOR"))}
+	return &QueryOperation{OsVersion: os_version, GithubOperation: git.NewGithubOperation()}
 }
 
 func (qop *QueryOperation) GetTargetCVEs(src_bin_map map[ttypes.PackageDetail][]string) map[ttypes.PackageDetail][]UbuntuCVE {
@@ -219,7 +218,7 @@ func (qop *QueryOperation) GetCVEExploitability(src_bin_map map[ttypes.PackageDe
 			fixed_files := map[string]bool{}
 			for _, diff_url := range target_patches.DiffURLs {
 				if strings.Contains(diff_url, "github.com") {
-					new_fixed_files, err := qop.GitOperation.GetFixedFiles(diff_url)
+					new_fixed_files, err := qop.GithubOperation.GetFixedFiles(diff_url)
 					for new_fixed_file, _ := range new_fixed_files {
 						fixed_files[new_fixed_file] = true
 					}
