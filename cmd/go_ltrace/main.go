@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -81,6 +82,9 @@ func main() {
 	// setting env var
 	err := godotenv.Load()
 	uutil.ErrFatal(err)
+
+	// read flag
+	flag.Parse()
 
 	// initialize logger
 	log.InitLogger()

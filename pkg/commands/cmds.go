@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,13 +33,22 @@ const (
 	CACHE_DIR          = "$HOME/.cache/"
 )
 
+// flag arguments
+var (
+	Profile = flag.String("profile", "", "profile path for go tool covdata")
+)
+
 // command options
-var LTRACE_OPTIONS = []string{"-o", LTARCE_OUTPUT_FILE, "-f"}
-var STRACE_OPTIONS = []string{"-o", STRACE_OUTPUT_FILE, "-s", "1000", "-f", "-e", "trace=openat"}
-var DPKG_OPTIONS = []string{"-S"}
-var APTSHOW_GREP_OPTIONS = []string{"-E", "Package:|Version:|Source:"}
-var APTCACHE_OPTIONS = []string{"show"}
-var LSB_RELEASE_OPTIONS = []string{"-a"}
+var (
+	LtraceOptions           = []string{"-o", LTARCE_OUTPUT_FILE, "-f"}
+	StraceOptions           = []string{"-o", STRACE_OUTPUT_FILE, "-s", "1000", "-f", "-e", "trace=openat"}
+	DpkgOptions             = []string{"-S"}
+	AptshowGrepOptions      = []string{"-E", "Package:|Version:|Source:"}
+	AptcacheOptions         = []string{"show"}
+	LsbReleaseOptions       = []string{"-a"}
+	GoToolCovdataOptions    = []string{"tool", "covdata", "textfmt", "-i=" + os.Getenv("COVERDIR"), "-o", *Profile}
+	GoToolGetFuncCovOptions = []string{"tool", "cover", "-func=" + *Profile}
+)
 
 type CommandSet struct {
 	OsVersion string
@@ -51,9 +61,25 @@ func NewCommandSet() *CommandSet {
 	return cmds
 }
 
+func (cmds *CommandSet) goToolCovdata() (string, error) {
+
+	if strings.Compare(*Profile, "") == 0 {
+		return "", xerrors.Errorf("-profile should be set.\n")
+	}
+
+	cmd := exec.Command(CMD_GO, GoToolCovdataOptions...)
+	err := cmd.Run()
+	uutil.ErrFatal(err)
+
+	out, err2 := exec.Command(CMD_GO, GoToolGetFuncCovOptions...).Output()
+	uutil.ErrFatal(err2)
+
+	return string(out), nil
+}
+
 func (cmds *CommandSet) getOsVersion() {
 
-	out, err := exec.Command(CMD_LSB_RELEASE, LSB_RELEASE_OPTIONS...).Output()
+	out, err := exec.Command(CMD_LSB_RELEASE, LsbReleaseOptions...).Output()
 	uutil.ErrFatal(err)
 
 	lines := strings.Split(string(out), "\n")
@@ -90,14 +116,15 @@ func (cmds CommandSet) Dpkg(lib_map map[string]bool) (map[string][]string, error
 
 	for {
 
-		dpkg_args := append(DPKG_OPTIONS, target_paths...)
+		dpkg_args := append(DpkgOptions, target_paths...)
 		cmd := exec.Command(CMD_DPKG, dpkg_args...)
 
 		// separate stdout and stderr
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		cmd.Run()
+		err := cmd.Run()
+		uutil.ErrFatal(err)
 
 		// get only files dpkg can find the target package
 		s := stdout.String()
@@ -174,12 +201,12 @@ func (cmds CommandSet) AptShow(package_lib_map map[string][]string) (map[ttypes.
 	}
 
 	// apt-cache show ...
-	cmd_args := append(APTCACHE_OPTIONS, package_list...)
+	cmd_args := append(AptcacheOptions, package_list...)
 	out1, err := exec.Command(CMD_APTCACHE, cmd_args...).Output()
 	uutil.ErrFatal(err)
 
 	// | grep -E 'Pacakge:|Source:' ...
-	cmd2_args := APTSHOW_GREP_OPTIONS
+	cmd2_args := AptshowGrepOptions
 	cmd2 := exec.Command(CMD_GREP, cmd2_args...)
 	cmd2.Stdin = bytes.NewBuffer(out1)
 
@@ -236,7 +263,7 @@ func (cmds CommandSet) Ltrace(trace_target []string) map[string]bool {
 
 	fmt.Println("[+] Ltrace Start.")
 
-	trace_args := append(LTRACE_OPTIONS, trace_target...)
+	trace_args := append(LtraceOptions, trace_target...)
 	cmd_ltrace := exec.Command(CMD_LTRACE, trace_args...)
 	cmd_ltrace.Stdin = os.Stdin
 	cmd_ltrace.Stdout = os.Stdout
@@ -263,7 +290,7 @@ func (cmds CommandSet) Strace(trace_target []string) map[string]bool {
 
 	fmt.Println("[+] Starce Start.")
 
-	strace_args := append(STRACE_OPTIONS, trace_target...)
+	strace_args := append(StraceOptions, trace_target...)
 	cmd_strace := exec.Command(CMD_STRACE, strace_args...)
 	cmd_strace.Stdin = os.Stdin
 	cmd_strace.Stdout = os.Stdout
