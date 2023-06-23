@@ -35,7 +35,7 @@ func (runner Runner) Run(target_args []string) {
 	}
 
 	// trace the target program at executed time
-	if runner.Cmds.DinamicallyLinked(target_args) {
+	if runner.Cmds.DynamicallyLinked(target_args) {
 
 		// using strace (trace only used shared libraries)
 		if strace {

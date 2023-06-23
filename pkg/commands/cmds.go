@@ -13,62 +13,26 @@ import (
 	"golang.org/x/xerrors"
 )
 
-// ltrace command global variables and reserved words
+// Linux command
 const (
-	CMD_LTRACE         = "ltrace"
-	LTARCE_OUTPUT_FILE = "lt_out"
-	STATE_START_DOTS   = "<..."
-	RESUMED            = "resumed>"
-	STATE_END_DOTS     = "...>"
-	UNFINISED          = "<unfinised"
-	NO                 = "<no"
-	RETURN             = "return"
-	PPPLUS             = "+++"
-	MMMINUS            = "---"
-	SIG_PREFIX         = "SIG"
-	UNEXPECTED         = "unexpected"
-	L_ROUND_BRAC       = "("
-	R_ROUND_BRAC       = ")"
-)
-
-// strace command global variables and reserved words
-const (
-	CMD_STRACE         = "strace"
-	STRACE_OUTPUT_FILE = "st_out"
-	OPENAT             = "openat"
-	// L_SQUARE_BRAC      = "["
-	// R_SQUARE_BRAC      = "]"
-)
-
-// dynamically linked
-const (
-	CMD_FILE           = "file"
-	DYNAMICALLY_LINKED = "dynamically linked"
-)
-
-// dpkg
-const (
-	CMD_DPKG = "dpkg"
-)
-
-// apt show
-const (
-	CMD_APTCACHE = "apt-cache"
-)
-
-// grep
-const (
-	CMD_GREP = "grep"
-)
-
-const (
+	CMD_LTRACE      = "ltrace"
+	CMD_STRACE      = "strace"
+	CMD_FILE        = "file"
+	CMD_DPKG        = "dpkg"
+	CMD_APTCACHE    = "apt-cache"
+	CMD_GREP        = "grep"
 	CMD_LSB_RELEASE = "lsb_release"
+	CMD_GO          = "go"
 )
 
+// cache file
 const (
-	CACHE_DIR = "$HOME/.cache/"
+	LTARCE_OUTPUT_FILE = "lt_out"
+	STRACE_OUTPUT_FILE = "st_out"
+	CACHE_DIR          = "$HOME/.cache/"
 )
 
+// command options
 var LTRACE_OPTIONS = []string{"-o", LTARCE_OUTPUT_FILE, "-f"}
 var STRACE_OPTIONS = []string{"-o", STRACE_OUTPUT_FILE, "-s", "1000", "-f", "-e", "trace=openat"}
 var DPKG_OPTIONS = []string{"-S"}
@@ -101,7 +65,7 @@ func (cmds *CommandSet) getOsVersion() {
 	}
 }
 
-func (cmds CommandSet) DinamicallyLinked(trace_target []string) bool {
+func (cmds CommandSet) DynamicallyLinked(trace_target []string) bool {
 	res, err := exec.Command(CMD_FILE, trace_target...).Output()
 	uutil.ErrFatal(err)
 

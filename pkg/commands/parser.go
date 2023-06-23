@@ -8,6 +8,34 @@ import (
 	"golang.org/x/xerrors"
 )
 
+// ltrace reserved words for parse
+const (
+	STATE_START_DOTS = "<..."
+	RESUMED          = "resumed>"
+	STATE_END_DOTS   = "...>"
+	UNFINISED        = "<unfinised"
+	NO               = "<no"
+	RETURN           = "return"
+	PPPLUS           = "+++"
+	MMMINUS          = "---"
+	SIG_PREFIX       = "SIG"
+	UNEXPECTED       = "unexpected"
+	L_ROUND_BRAC     = "("
+	R_ROUND_BRAC     = ")"
+)
+
+// strace command global variables and reserved words
+const (
+	OPENAT = "openat"
+	// L_SQUARE_BRAC      = "["
+	// R_SQUARE_BRAC      = "]"
+)
+
+// file command reserved words for parse
+const (
+	DYNAMICALLY_LINKED = "dynamically linked"
+)
+
 type Parser struct{}
 
 func (parser Parser) LtraceParse(s string) (map[pid_t]map[CallFunc]bool, map[string]bool, error) {
