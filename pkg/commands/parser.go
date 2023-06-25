@@ -39,9 +39,10 @@ const (
 
 type Parser struct{}
 
-func (parser Parser) goCovProfileParse(s string) (map[string][]FuncCoverage, error) {
+func (parser Parser) goCovProfileParse(s string) (map[string][]FuncCoverage, map[string]map[string]bool, error) {
 	lines := strings.Split(s, "\n")
 	pkg_func_coverage_map := map[string][]FuncCoverage{}
+	file_func_map := map[string]map[string]bool{}
 
 	for _, line := range lines {
 
@@ -54,7 +55,7 @@ func (parser Parser) goCovProfileParse(s string) (map[string][]FuncCoverage, err
 		first_colon_id := strings.Index(tokens[0], ":")
 		second_colon_id := strings.LastIndex(tokens[0], ":")
 		if first_colon_id == -1 || second_colon_id == -1 || first_colon_id == second_colon_id {
-			return map[string][]FuncCoverage{}, xerrors.Errorf("Bug: strange func coverage at goCovProfileParse. '%v'\n", tokens[0])
+			return map[string][]FuncCoverage{}, map[string]map[string]bool{}, xerrors.Errorf("Bug: strange func coverage at goCovProfileParse. '%v'\n", tokens[0])
 		}
 		path := tokens[0][:first_colon_id]
 		package_name := path // in current design, package_name is same for the path.
@@ -63,22 +64,22 @@ func (parser Parser) goCovProfileParse(s string) (map[string][]FuncCoverage, err
 		func_name := tokens[1]
 		coverage := tokens[2]
 
-		// remove the function of coverage is 0%
-		if strings.Compare(coverage, "0.0%") == 0 {
-			continue
+		// append not zero coverage function
+		if strings.Compare(coverage, "0.0%") != 0 {
+			func_coverage := NewFuncCoverage(package_name, path, func_line, func_name, coverage)
+
+			if func_covs, exist := pkg_func_coverage_map[package_name]; exist {
+				func_covs = append(func_covs, *func_coverage)
+				pkg_func_coverage_map[package_name] = func_covs
+			} else {
+				pkg_func_coverage_map[package_name] = []FuncCoverage{*func_coverage}
+			}
 		}
 
-		func_coverage := NewFuncCoverage(package_name, path, func_line, func_name, coverage)
-
-		if func_covs, exist := pkg_func_coverage_map[package_name]; exist {
-			func_covs = append(func_covs, *func_coverage)
-			pkg_func_coverage_map[package_name] = func_covs
-		} else {
-			pkg_func_coverage_map[package_name] = []FuncCoverage{*func_coverage}
-		}
+		file_func_map[package_name][func_name] = true
 	}
 
-	return pkg_func_coverage_map, nil
+	return pkg_func_coverage_map, file_func_map, nil
 }
 
 func (parser Parser) LtraceParse(s string) (map[pid_t]map[CallFunc]bool, map[string]bool, error) {
