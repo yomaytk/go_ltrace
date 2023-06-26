@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
@@ -21,15 +20,28 @@ var CACHE_FILE = "./cache"
 
 type LangDiffOperation interface{}
 
-type FuncSignature struct {
-	Name string `json:"name"`
-	Args []string
-}
-
 type FuncLocation struct {
 	FuncName  string `json:"name"`
 	StartLine int    `json:"start_line"`
 	EndLine   int    `json:"end_line"`
+}
+
+type FileDiff struct {
+	FileName string
+	Content  string
+}
+
+type DiffType uint8
+
+const (
+	Addition DiffType = iota
+	Deletion
+)
+
+type DiffLines struct {
+	Type   DiffType
+	Start  int
+	Length int
 }
 
 type GithubOperation struct {
@@ -106,11 +118,92 @@ func (ghop GithubOperation) GetFixedFilesFromPullRequest(git_url string) (map[st
 	}
 }
 
-func (ghop GithubOperation) GetDiffFromCommit(git_url string) ([]FuncSignature, error) {
+func (ghop GithubOperation) getFixedLocation(file_diff *FileDiff) ([]DiffLines, error) {
+	diff_liness := []DiffLines{}
+	lines := strings.Split(file_diff.Content, "\n")
+	id := 0
+	if strings.HasPrefix(lines[id], "@@") {
+		// get hunk header info
+		tokens := strings.Fields(lines[id])
+		before_header := strings.Split(tokens[1], ",")
+		after_header := strings.Split(tokens[2], ",")
+
+		if !strings.HasPrefix(before_header[0], "-") {
+			return diff_liness, xerrors.Errorf("Bug: Strange git huk deletion header at getFixedLocation.\n")
+		}
+
+		before_start_l, err := strconv.Atoi(before_header[0])
+		before_start_l *= -1
+		uutil.ErrFatal(err)
+		_, err = strconv.Atoi(before_header[1])
+		uutil.ErrFatal(err)
+
+		after_start_l, err := strconv.Atoi(after_header[0])
+		uutil.ErrFatal(err)
+		_, err = strconv.Atoi(before_header[1])
+		uutil.ErrFatal(err)
+
+		// start reading of deletion and addition
+		id++
+
+		deletion_start_l := -1
+		addition_start_l := -1
+		before_l := before_start_l - 1
+		after_l := after_start_l - 1
+
+		for id < len(lines) {
+			if strings.HasPrefix(lines[id], "-") {
+				// get deletions
+				if deletion_start_l != -1 {
+					return diff_liness, xerrors.Errorf("Bug: get deletions error at getFixedLocation.\n")
+				}
+				before_l++
+				deletion_start_l = before_l
+				id++
+				for ; ; id++ {
+					if strings.HasPrefix(lines[id], "-") {
+						before_l++
+					} else {
+						break
+					}
+				}
+				diff_liness = append(diff_liness, DiffLines{Type: Deletion, Start: deletion_start_l, Length: before_l - deletion_start_l + 1})
+				deletion_start_l = -1
+			} else if strings.HasPrefix(lines[id], "+") {
+				// get additions
+				if addition_start_l != -1 {
+					return diff_liness, xerrors.Errorf("Bug: get additions error at getFixedLocation.\n")
+				}
+				after_l++
+				addition_start_l = after_l
+				id++
+				for ; ; id++ {
+					if strings.HasPrefix(lines[id], "+") {
+						after_l++
+					} else {
+						break
+					}
+				}
+				diff_liness = append(diff_liness, DiffLines{Type: Addition, Start: addition_start_l, Length: after_l - addition_start_l})
+				addition_start_l = -1
+			} else {
+				id++
+				before_l++
+				after_l++
+			}
+		}
+	} else {
+		return diff_liness, xerrors.Errorf("Bug: Strange github hunk header at getFixedLocatin.\n")
+	}
+	return diff_liness, nil
+}
+
+func (ghop GithubOperation) GetDiffFromCommit(git_url string) ([]FileDiff, error) {
+	file_diffs := []FileDiff{}
+
 	tokens := strings.Split(git_url, "/")
 	if strings.Compare(tokens[len(tokens)-2], "commit") == 0 {
 
-		func_signatures := []FuncSignature{}
 		// initialize authorization info
 		ctx, client := ghop.NewGithubClient()
 
@@ -121,17 +214,14 @@ func (ghop GithubOperation) GetDiffFromCommit(git_url string) ([]FuncSignature, 
 		repo_commit, _, err := client.Repositories.GetCommit(ctx, owner, repo, commit_sha, nil)
 		uutil.ErrFatal(err)
 
-		var diff_content string
 		for _, file := range repo_commit.Files {
 			file_name := *file.Filename
-			diff_content = diff_content + "\n\n" + file_name + "\n\n" + file.GetPatch()
+			file_diffs = append(file_diffs, FileDiff{FileName: file_name, Content: file.GetPatch()})
 		}
-		err = ioutil.WriteFile(CACHE_FILE, []byte(diff_content), 0644)
-		uutil.ErrFatal(err)
 
-		return func_signatures, nil
+		return file_diffs, nil
 	} else {
-		return []FuncSignature{}, xerrors.Errorf("Bug: Strange github url at GetDiffFromCommit. '%v'\n", git_url)
+		return file_diffs, xerrors.Errorf("Bug: Strange github url at GetDiffFromCommit. '%v'\n", git_url)
 	}
 }
 
