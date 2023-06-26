@@ -2,6 +2,7 @@ package gitrepo
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -27,7 +28,7 @@ type FuncLocation struct {
 }
 
 type FileDiff struct {
-	FileName string
+	FilePath string
 	Content  string
 }
 
@@ -60,62 +61,6 @@ func (ghop GithubOperation) NewGithubClient() (context.Context, *github.Client) 
 	tc := oauth2.NewClient(ctx, ghop.TokenSource)
 	client := github.NewClient(tc)
 	return ctx, client
-}
-
-func (ghop GithubOperation) GetFixedFilesFromCommit(git_url string) (map[string]bool, error) {
-	tokens := strings.Split(git_url, "/")
-	if strings.Compare(tokens[len(tokens)-2], "commit") == 0 {
-
-		fixed_files := map[string]bool{}
-		// initialize authorization info
-		ctx, client := ghop.NewGithubClient()
-
-		owner := tokens[len(tokens)-4]
-		repo := tokens[len(tokens)-3]
-		commit_sha := tokens[len(tokens)-1]
-
-		repo_commit, _, err := client.Repositories.GetCommit(ctx, owner, repo, commit_sha, nil)
-		uutil.ErrFatal(err)
-
-		for _, fixed_file := range repo_commit.Files {
-			fixed_files[*fixed_file.Filename] = true
-		}
-
-		return fixed_files, nil
-	} else {
-		return map[string]bool{}, xerrors.Errorf("Bug: Strange github url at GetFixedFilesFromCommit. '%v'\n", git_url)
-	}
-}
-
-func (ghop GithubOperation) GetFixedFilesFromPullRequest(git_url string) (map[string]bool, error) {
-
-	if strings.Contains(git_url, "/commits/") {
-		git_url = strings.Split(git_url, "/commits/")[0]
-	}
-
-	tokens := strings.Split(git_url, "/")
-	if strings.Compare(tokens[len(tokens)-2], "pull") == 0 {
-
-		fixed_files := map[string]bool{}
-		// initialize authorization info
-		ctx, client := ghop.NewGithubClient()
-
-		owner := tokens[len(tokens)-4]
-		repo := tokens[len(tokens)-3]
-		pull_num, err := strconv.Atoi(tokens[len(tokens)-1])
-		uutil.ErrFatal(err)
-
-		files, _, err := client.PullRequests.ListFiles(ctx, owner, repo, pull_num, nil)
-		uutil.ErrFatal(err)
-
-		for _, file := range files {
-			fixed_files[*file.Filename] = true
-		}
-
-		return fixed_files, nil
-	} else {
-		return map[string]bool{}, xerrors.Errorf("Bug: Strange github url at GetFixedFilesFromPullRequest. '%v'\n", git_url)
-	}
 }
 
 func (ghop GithubOperation) getFixedLocation(file_diff *FileDiff) ([]DiffLines, error) {
@@ -215,8 +160,9 @@ func (ghop GithubOperation) GetDiffFromCommit(git_url string) ([]FileDiff, error
 		uutil.ErrFatal(err)
 
 		for _, file := range repo_commit.Files {
-			file_name := *file.Filename
-			file_diffs = append(file_diffs, FileDiff{FileName: file_name, Content: file.GetPatch()})
+			file_path := *file.Filename
+			file_diffs = append(file_diffs, FileDiff{FilePath: file_path, Content: file.GetPatch()})
+			fmt.Println(file_path)
 		}
 
 		return file_diffs, nil
@@ -225,9 +171,111 @@ func (ghop GithubOperation) GetDiffFromCommit(git_url string) ([]FileDiff, error
 	}
 }
 
-func (ghop GithubOperation) GetPreCommitFuncLocation(git_url string, file_path string) ([]FuncLocation, error) {
+func (ghop GithubOperation) GetDiffFromPR(git_url string) ([]FileDiff, error) {
+	file_diffs := []FileDiff{}
 
-	func_locations := []FuncLocation{}
+	if strings.Contains(git_url, "/commits/") {
+		git_url = strings.Split(git_url, "/commits/")[0]
+	}
+
+	tokens := strings.Split(git_url, "/")
+	if strings.Compare(tokens[len(tokens)-2], "pull") == 0 {
+
+		// initialize authorization info
+		ctx, client := ghop.NewGithubClient()
+
+		owner := tokens[len(tokens)-4]
+		repo := tokens[len(tokens)-3]
+		pull_num, err := strconv.Atoi(tokens[len(tokens)-1])
+		uutil.ErrFatal(err)
+
+		files, _, err := client.PullRequests.ListFiles(ctx, owner, repo, pull_num, nil)
+		uutil.ErrFatal(err)
+
+		for _, file := range files {
+			file_path := *file.Filename
+			file_diffs = append(file_diffs, FileDiff{FilePath: file_path, Content: file.GetPatch()})
+		}
+
+		return file_diffs, nil
+	} else {
+		return file_diffs, xerrors.Errorf("Bug: Strange github url at GetFixedFilesFromPullRequest. '%v'\n", git_url)
+	}
+}
+
+func (ghop GithubOperation) GetPrePRFuncLocation(git_url string, file_diffs []FileDiff) (map[string][]FuncLocation, error) {
+	file_func_locations := map[string][]FuncLocation{}
+
+	if strings.Contains(git_url, "/commits/") {
+		git_url = strings.Split(git_url, "/commits/")[0]
+	}
+
+	tokens := strings.Split(git_url, "/")
+	if strings.Compare(tokens[len(tokens)-2], "pull") == 0 {
+
+		// initialize authorization info
+		ctx, client := ghop.NewGithubClient()
+
+		owner := tokens[len(tokens)-4]
+		repo := tokens[len(tokens)-3]
+		pull_num, err := strconv.Atoi(tokens[len(tokens)-1])
+		uutil.ErrFatal(err)
+
+		commits, _, err := client.PullRequests.ListCommits(ctx, owner, repo, pull_num, nil)
+		uutil.ErrFatal(err)
+
+		if commits == nil || len(commits) <= 0 {
+			return file_func_locations, xerrors.Errorf("Bug: this PR doesn't have commits at GetPrePRFuncLocation.\n")
+		}
+
+		parent_commits := commits[0].Parents
+
+		if len(parent_commits) > 1 {
+			log.Logger.Infoln("WARNING: target commit has multiple parents.\n")
+		} else if len(parent_commits) == 0 {
+			return map[string][]FuncLocation{}, xerrors.Errorf("Bug: the commit don't has the parents commit at GetPrePRFuncLocation.\n")
+		}
+
+		pre_commit_sha := *parent_commits[0].SHA
+
+		for _, file_diff := range file_diffs {
+			// get the file content before target commit (use the parent of target commit)
+			file_path := file_diff.FilePath
+			ctx2, client2 := ghop.NewGithubClient()
+			file_content, _, _, err := client2.Repositories.GetContents(ctx2, owner, repo, file_path, &github.RepositoryContentGetOptions{Ref: pre_commit_sha})
+			uutil.ErrFatal(err)
+			content, err := file_content.GetContent()
+			uutil.ErrFatal(err)
+
+			// parse the file content and get function location
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "", content, 0)
+			uutil.ErrFatal(err)
+
+			for _, decl := range f.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok {
+					func_name := fn.Name.Name
+					start_line := fset.Position(fn.Pos()).Line - 1
+					end_line := fset.Position(fn.End()).Line - 1
+					func_location := FuncLocation{FuncName: func_name, StartLine: start_line, EndLine: end_line}
+					if func_locations, exist := file_func_locations[file_path]; exist {
+						func_locations = append(func_locations, func_location)
+						file_func_locations[file_path] = func_locations
+					} else {
+						file_func_locations[file_path] = []FuncLocation{func_location}
+					}
+				}
+			}
+		}
+		return file_func_locations, nil
+	} else {
+		return file_func_locations, xerrors.Errorf("Bug: Strange github url at GetFixedFilesFromPullRequest. '%v'\n", git_url)
+	}
+}
+
+func (ghop GithubOperation) GetPreCommitFuncLocation(git_url string, file_diffs []FileDiff) (map[string][]FuncLocation, error) {
+
+	file_func_locations := map[string][]FuncLocation{}
 	tokens := strings.Split(git_url, "\n")
 
 	// initialize authorization info
@@ -244,47 +292,44 @@ func (ghop GithubOperation) GetPreCommitFuncLocation(git_url string, file_path s
 	if len(repo_commit.Parents) > 1 {
 		log.Logger.Infoln("WARNING: target commit has multiple parents.\n")
 	} else if len(repo_commit.Parents) == 0 {
-		return []FuncLocation{}, xerrors.Errorf("Bug: commit don't has the parents commit at GerPreCommitFuncLocation.\n")
+		return map[string][]FuncLocation{}, xerrors.Errorf("Bug: commit don't has the parents commit at GerPreCommitFuncLocation.\n")
 	}
 
-	// get the file content before target commit (use the parent of target commit)
-	ctx2, client2 := ghop.NewGithubClient()
 	pre_commit_sha := repo_commit.Parents[0].GetSHA()
-	file_content, _, _, err := client2.Repositories.GetContents(ctx2, owner, repo, file_path, &github.RepositoryContentGetOptions{Ref: pre_commit_sha})
-	uutil.ErrFatal(err)
-	content, err := file_content.GetContent()
-	uutil.ErrFatal(err)
 
-	// parse the file content and get function location
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "", content, 0)
-	uutil.ErrFatal(err)
+	for _, file_diff := range file_diffs {
+		// get the file content before target commit (use the parent of target commit)
+		file_path := file_diff.FilePath
+		ctx2, client2 := ghop.NewGithubClient()
+		file_content, _, _, err := client2.Repositories.GetContents(ctx2, owner, repo, file_path, &github.RepositoryContentGetOptions{Ref: pre_commit_sha})
+		uutil.ErrFatal(err)
+		content, err := file_content.GetContent()
+		uutil.ErrFatal(err)
 
-	for _, decl := range f.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok {
-			func_name := fn.Name.Name
-			start_line := fset.Position(fn.Pos()).Line - 1
-			end_line := fset.Position(fn.End()).Line - 1
-			func_location := FuncLocation{FuncName: func_name, StartLine: start_line, EndLine: end_line}
-			func_locations = append(func_locations, func_location)
+		// parse the file content and get function location
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "", content, 0)
+		uutil.ErrFatal(err)
+
+		for _, decl := range f.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				func_name := fn.Name.Name
+				start_line := fset.Position(fn.Pos()).Line - 1
+				end_line := fset.Position(fn.End()).Line - 1
+				func_location := FuncLocation{FuncName: func_name, StartLine: start_line, EndLine: end_line}
+				if func_locations, exist := file_func_locations[file_path]; exist {
+					func_locations = append(func_locations, func_location)
+					file_func_locations[file_path] = func_locations
+				} else {
+					file_func_locations[file_path] = []FuncLocation{func_location}
+				}
+			}
 		}
 	}
 
-	return func_locations, nil
+	return file_func_locations, nil
 }
 
 func (ghop GithubOperation) GetFixedFiles(git_url string) (map[string]bool, error) {
-
-	if strings.Contains(git_url, "/commit/") {
-		fixed_files, err := ghop.GetFixedFilesFromCommit(git_url)
-		uutil.ErrFatal(err)
-		return fixed_files, nil
-	} else if strings.Contains(git_url, "/pull/") {
-		fixed_files, err := ghop.GetFixedFilesFromPullRequest(git_url)
-		uutil.ErrFatal(err)
-		return fixed_files, nil
-	} else {
-		return map[string]bool{}, xerrors.Errorf("strange github url: %v\n", git_url)
-	}
-
+	return map[string]bool{}, xerrors.Errorf("strange github url: %v\n", git_url)
 }
