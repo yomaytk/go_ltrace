@@ -86,18 +86,26 @@ func GetFuncLocation(content string) ([]gity.FuncLocation, error) {
 				param_types = append(param_types, param_type_name)
 			}
 
+			// get return types
+			return_types := []string{}
+			for _, return_type := range fn.Type.Results.List {
+				return_type_name, err := getParamTypes(return_type.Type)
+				uutil.ErrFatal(err)
+				return_types = append(return_types, return_type_name)
+			}
+
 			// struct method
 			struct_type := ""
 			if fn.Recv != nil {
 				expr := fn.Recv.List[0].Type
 				if starExpr, ok := expr.(*ast.StarExpr); ok {
-					struct_type = starExpr.X.(*ast.Ident).Name
+					struct_type = "*" + starExpr.X.(*ast.Ident).Name
 				} else if ident, ok := expr.(*ast.Ident); ok {
 					struct_type = ident.Name
 				}
 			}
 
-			func_location := gity.NewFuncLocation(func_name, param_types, struct_type, start_line, end_line)
+			func_location := gity.NewFuncLocation(func_name, param_types, return_types, struct_type, start_line, end_line)
 			func_locations = append(func_locations, func_location)
 		}
 	}
