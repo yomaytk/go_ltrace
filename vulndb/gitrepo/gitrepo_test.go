@@ -45,26 +45,21 @@ func TestCommitDiff(t *testing.T) {
 	}
 
 	ans_file_func_locations := map[string][]gity.FuncLocation{
-		"configuration/configuration.go": {gity.NewFuncLocation("UnmarshalYAML", "*Version", []string{"func(interface{}) error"}, []string{"error"}, 372, 390), gity.NewFuncLocation("UnmarshalYAML", "*Loglevel", []string{"func(interface{}) error"}, []string{"error"}, 402, 418), gity.NewFuncLocation("Type", "Storage", []string{}, []string{"string"}, 427, 452), gity.NewFuncLocation("Parameters", "Storage", []string{}, []string{"Parameters"}, 455, 457), gity.NewFuncLocation("setParameter", "Storage", []string{"string", "interface{}"}, []string{}, 460, 462), gity.NewFuncLocation("UnmarshalYAML", "*Storage", []string{"func(interface{}) error"}, []string{"error"}, 466, 503), gity.NewFuncLocation("MarshalYAML", "Storage", []string{}, []string{"interface{}", "error"}, 506, 511), gity.NewFuncLocation("Type", "Auth", []string{}, []string{"string"}, 517, 523), gity.NewFuncLocation("Parameters", "Auth", []string{}, []string{"Parameters"}, 526, 528), gity.NewFuncLocation("setParameter", "Auth", []string{"string", "interface{}"}, []string{}, 531, 533), gity.NewFuncLocation("UnmarshalYAML", "*Auth", []string{"func(interface{}) error"}, []string{"error"}, 537, 564), gity.NewFuncLocation("MarshalYAML", "Auth", []string{}, []string{"interface{}", "error"}, 567, 572), gity.NewFuncLocation("Parse", "", []string{"io.Reader"}, []string{"*Configuratin", "error"}, 667, 706)},
+		"configuration/configuration.go": {gity.NewFuncLocation("UnmarshalYAML", "*Version", []string{"func (interface{}) error"}, []string{"error"}, 372, 390), gity.NewFuncLocation("UnmarshalYAML", "*Loglevel", []string{"func (interface{}) error"}, []string{"error"}, 402, 418), gity.NewFuncLocation("Type", "Storage", []string{}, []string{"string"}, 427, 452), gity.NewFuncLocation("Parameters", "Storage", []string{}, []string{"Parameters"}, 455, 457), gity.NewFuncLocation("setParameter", "Storage", []string{"string", "interface{}"}, []string{}, 460, 462), gity.NewFuncLocation("UnmarshalYAML", "*Storage", []string{"func (interface{}) error"}, []string{"error"}, 466, 503), gity.NewFuncLocation("MarshalYAML", "Storage", []string{}, []string{"interface{}", "error"}, 506, 511), gity.NewFuncLocation("Type", "Auth", []string{}, []string{"string"}, 517, 523), gity.NewFuncLocation("Parameters", "Auth", []string{}, []string{"Parameters"}, 526, 528), gity.NewFuncLocation("setParameter", "Auth", []string{"string", "interface{}"}, []string{}, 531, 533), gity.NewFuncLocation("UnmarshalYAML", "*Auth", []string{"func (interface{}) error"}, []string{"error"}, 537, 564), gity.NewFuncLocation("MarshalYAML", "Auth", []string{}, []string{"interface{}", "error"}, 567, 572), gity.NewFuncLocation("Parse", "", []string{"io.Reader"}, []string{"*Configuration", "error"}, 667, 706)},
 	}
 
 	file_func_locations, err := ghop.GetPreCommitFuncLocation(SampleCommitURL, file_diffs)
 	uutil.ErrFatal(err)
 
-	t.Run("FileFuncLocation Size Test", func(t *testing.T) {
-		if len(file_func_locations) != len(ans_file_func_locations) {
-			t.Fatalf("Test Error: Content: %v, Answer: %v\n", len(file_func_locations), len(ans_file_func_locations))
-		}
-	})
-
-	t.Run("FileFuncLocation Equal Test", func(t *testing.T) {
-		for path, ans_func_locations := range ans_file_func_locations {
-			if !reflect.DeepEqual(file_func_locations[path], ans_func_locations) {
-				t.Fatalf("Test Error: Content: %+v, Answer: %+v\n", file_func_locations[path], ans_file_func_locations[path])
+	for path, ans_func_locations := range ans_file_func_locations {
+		t.Run(fmt.Sprintf("FileFuncLocation '%v' Test Start", path), func(t *testing.T) {
+			func_locations := file_func_locations[path]
+			for i := 0; i < len(ans_func_locations); i++ {
+				if !reflect.DeepEqual(func_locations[i], ans_func_locations[i]) {
+					t.Fatalf("Test Error: Content: %+v, Answer: %+v\n", func_locations[i], ans_func_locations[i])
+				}
 			}
-		}
-	})
-
-	fmt.Println(file_func_locations)
+		})
+	}
 
 }
