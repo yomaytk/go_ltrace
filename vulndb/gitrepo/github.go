@@ -3,9 +3,6 @@ package gitrepo
 import (
 	"context"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"strconv"
 	"strings"
@@ -296,25 +293,11 @@ func (ghop GithubOperation) GetPreCommitFuncLocation(git_url string, file_diffs 
 		content, err := file_content.GetContent()
 		uutil.ErrFatal(err)
 
-		// parse the file content and get function location
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, "", content, 0)
+		// get funclocatins of target file path
+		func_locations, err := goscan.GetFuncLocation(content)
 		uutil.ErrFatal(err)
 
-		for _, decl := range f.Decls {
-			if fn, ok := decl.(*ast.FuncDecl); ok {
-				func_name := fn.Name.Name
-				start_line := fset.Position(fn.Pos()).Line
-				end_line := fset.Position(fn.End()).Line
-				func_location := gity.FuncLocation{FuncName: func_name, StartLine: start_line, EndLine: end_line}
-				if func_locations, exist := file_func_locations[file_path]; exist {
-					func_locations = append(func_locations, func_location)
-					file_func_locations[file_path] = func_locations
-				} else {
-					file_func_locations[file_path] = []gity.FuncLocation{func_location}
-				}
-			}
-		}
+		file_func_locations[file_path] = func_locations
 	}
 
 	return file_func_locations, nil
