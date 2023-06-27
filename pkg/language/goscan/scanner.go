@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"reflect"
 
 	uutil "github.com/yomaytk/go_ltrace/util"
 	gity "github.com/yomaytk/go_ltrace/vulndb/gitrepo/types"
@@ -15,17 +16,21 @@ func getParamTypes(expr ast.Expr) (string, error) {
 	switch e_ty := expr.(type) {
 	case *ast.Ident:
 		return e_ty.Name, nil
-	case *ast.StarExpr:
-		name, err := getParamTypes(e_ty.X)
+	case *ast.SelectorExpr:
+		ttype, err := getParamTypes(e_ty.X)
 		uutil.ErrFatal(err)
-		return "*" + name, nil
+		return ttype + "." + e_ty.Sel.Name, nil
+	case *ast.StarExpr:
+		ttype, err := getParamTypes(e_ty.X)
+		uutil.ErrFatal(err)
+		return "*" + ttype, nil
 	case *ast.InterfaceType:
 		methods := ""
 		method_list := e_ty.Methods.List
 		for i := 0; i < len(method_list); i++ {
-			name, err := getParamTypes(method_list[i].Type)
+			ttype, err := getParamTypes(method_list[i].Type)
 			uutil.ErrFatal(err)
-			methods += name
+			methods += ttype
 			if i < len(method_list)-1 {
 				methods += ", "
 			}
@@ -36,9 +41,9 @@ func getParamTypes(expr ast.Expr) (string, error) {
 		params := ""
 		param_list := e_ty.Params.List
 		for i := 0; i < len(param_list); i++ {
-			name, err := getParamTypes(param_list[i].Type)
+			ttype, err := getParamTypes(param_list[i].Type)
 			uutil.ErrFatal(err)
-			params += name
+			params += ttype
 			if i < len(param_list)-1 {
 				params += ", "
 			}
@@ -47,17 +52,45 @@ func getParamTypes(expr ast.Expr) (string, error) {
 		results := ""
 		result_list := e_ty.Results.List
 		for i := 0; i < len(result_list); i++ {
-			name, err := getParamTypes(result_list[i].Type)
+			ttype, err := getParamTypes(result_list[i].Type)
 			uutil.ErrFatal(err)
-			results += name
+			results += ttype
 			if i < len(result_list)-1 {
 				results += ", "
 			}
 		}
 		return fmt.Sprintf("func (%v) %v", params, results), nil
+	case *ast.MapType:
+		// get key
+		key, err := getParamTypes(e_ty.Key)
+		uutil.ErrFatal(err)
+		value, err := getParamTypes(e_ty.Value)
+		uutil.ErrFatal(err)
+		return fmt.Sprintf("map[%v]%v", key, value), nil
+	case *ast.StructType:
+		// get field
+		fields := ""
+		field_lists := e_ty.Fields.List
+		for i := 0; i < len(field_lists); i++ {
+			field_ttype, err := getParamTypes(field_lists[i].Type)
+			uutil.ErrFatal(err)
+			fields += field_ttype
+			if i < len(field_lists)-1 {
+				fields += ", "
+			}
+		}
+		return fmt.Sprintf("struct {%v}", fields), nil
+	case *ast.ArrayType:
+		elem_ttype, err := getParamTypes(e_ty.Elt)
+		uutil.ErrFatal(err)
+		return fmt.Sprintf("[]%v", elem_ttype), nil
+	case *ast.Ellipsis:
+		elem_ttype, err := getParamTypes(e_ty.Elt)
+		uutil.ErrFatal(err)
+		return fmt.Sprintf("...%v", elem_ttype), nil
+	default:
+		return "", xerrors.Errorf("Bug unknown expression Type at getParamTypes.: '%v'\n", reflect.TypeOf(e_ty))
 	}
-
-	return "", xerrors.Errorf("Bug unknown expression Type at getParamTypes.\n")
 }
 
 func GetFuncLocation(content string) ([]gity.FuncLocation, error) {
@@ -73,25 +106,28 @@ func GetFuncLocation(content string) ([]gity.FuncLocation, error) {
 	for _, decl := range f.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
 			func_name := fn.Name.Name
-
 			// the line of start and end of fuction
 			start_line := fset.Position(fn.Pos()).Line
 			end_line := fset.Position(fn.End()).Line
 
 			// get paramter types
 			param_types := []string{}
-			for _, param_type := range fn.Type.Params.List {
-				param_type_name, err := getParamTypes(param_type.Type)
-				uutil.ErrFatal(err)
-				param_types = append(param_types, param_type_name)
+			if params := fn.Type.Params; params != nil {
+				for _, param_type := range params.List {
+					param_type_name, err := getParamTypes(param_type.Type)
+					uutil.ErrFatal(err)
+					param_types = append(param_types, param_type_name)
+				}
 			}
 
 			// get return types
 			return_types := []string{}
-			for _, return_type := range fn.Type.Results.List {
-				return_type_name, err := getParamTypes(return_type.Type)
-				uutil.ErrFatal(err)
-				return_types = append(return_types, return_type_name)
+			if returns := fn.Type.Results; returns != nil {
+				for _, return_type := range returns.List {
+					return_type_name, err := getParamTypes(return_type.Type)
+					uutil.ErrFatal(err)
+					return_types = append(return_types, return_type_name)
+				}
 			}
 
 			// struct method
