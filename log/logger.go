@@ -13,7 +13,7 @@ var (
 )
 
 const (
-	LOG_PATH = "./cache/go_ltrace.log"
+	LOG_PATH = "/home/masashi/workspace/security/go_ltrace/cache/go_ltrace.log"
 )
 
 func InitLogger() error {

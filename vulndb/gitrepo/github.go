@@ -11,8 +11,9 @@ import (
 	"strings"
 
 	"github.com/google/go-github/v53/github" // with go modules enabled (GO111MODULE=on or outside GOPATH)
-	log "github.com/yomaytk/go_ltrace/log"
+	"github.com/yomaytk/go_ltrace/pkg/language/goscan"
 	uutil "github.com/yomaytk/go_ltrace/util"
+	gity "github.com/yomaytk/go_ltrace/vulndb/gitrepo/types"
 	"golang.org/x/oauth2"
 	"golang.org/x/xerrors"
 )
@@ -20,12 +21,6 @@ import (
 var CACHE_FILE = "./cache"
 
 type LangDiffOperation interface{}
-
-type FuncLocation struct {
-	FuncName  string `json:"name"`
-	StartLine int    `json:"start_line"`
-	EndLine   int    `json:"end_line"`
-}
 
 type FileDiff struct {
 	FilePath string
@@ -53,7 +48,7 @@ func NewGithubOperation() *GithubOperation {
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: os.Getenv("GITHUB_ACCESS_TOKEN")},
 	)
-	return &GithubOperation{TokenSource: ts}
+	return &GithubOperation{ts}
 }
 
 func (ghop GithubOperation) NewGithubClient() (context.Context, *github.Client) {
@@ -162,7 +157,6 @@ func (ghop GithubOperation) GetDiffFromCommit(git_url string) ([]FileDiff, error
 		for _, file := range repo_commit.Files {
 			file_path := *file.Filename
 			file_diffs = append(file_diffs, FileDiff{FilePath: file_path, Content: file.GetPatch()})
-			fmt.Println(file_path)
 		}
 
 		return file_diffs, nil
@@ -203,8 +197,8 @@ func (ghop GithubOperation) GetDiffFromPR(git_url string) ([]FileDiff, error) {
 	}
 }
 
-func (ghop GithubOperation) GetPrePRFuncLocation(git_url string, file_diffs []FileDiff) (map[string][]FuncLocation, error) {
-	file_func_locations := map[string][]FuncLocation{}
+func (ghop GithubOperation) GetPrePRFuncLocation(git_url string, file_diffs []FileDiff) (map[string][]gity.FuncLocation, error) {
+	file_func_locations := map[string][]gity.FuncLocation{}
 
 	if strings.Contains(git_url, "/commits/") {
 		git_url = strings.Split(git_url, "/commits/")[0]
@@ -228,15 +222,20 @@ func (ghop GithubOperation) GetPrePRFuncLocation(git_url string, file_diffs []Fi
 			return file_func_locations, xerrors.Errorf("Bug: this PR doesn't have commits at GetPrePRFuncLocation.\n")
 		}
 
-		parent_commits := commits[0].Parents
+		// parents of the first commit of this PR
+		pre_commits := commits[0].Parents
 
-		if len(parent_commits) > 1 {
-			log.Logger.Infoln("WARNING: target commit has multiple parents.\n")
-		} else if len(parent_commits) == 0 {
-			return map[string][]FuncLocation{}, xerrors.Errorf("Bug: the commit don't has the parents commit at GetPrePRFuncLocation.\n")
+		if len(pre_commits) > 1 {
+			fmt.Printf("WARNING: target commit has %v parents. \n", len(pre_commits))
+			parents := pre_commits
+			for i := 0; i < len(pre_commits); i++ {
+				fmt.Printf("Parent_%v: %v\n", i, parents[i].GetSHA())
+			}
+		} else if len(pre_commits) == 0 {
+			return map[string][]gity.FuncLocation{}, xerrors.Errorf("Bug: the commit don't has the parents commit at GetPrePRFuncLocation.\n")
 		}
 
-		pre_commit_sha := *parent_commits[0].SHA
+		pre_commit_sha := *pre_commits[0].SHA
 
 		for _, file_diff := range file_diffs {
 			// get the file content before target commit (use the parent of target commit)
@@ -247,25 +246,11 @@ func (ghop GithubOperation) GetPrePRFuncLocation(git_url string, file_diffs []Fi
 			content, err := file_content.GetContent()
 			uutil.ErrFatal(err)
 
-			// parse the file content and get function location
-			fset := token.NewFileSet()
-			f, err := parser.ParseFile(fset, "", content, 0)
+			// get funclocatins of target file path
+			func_locations, err := goscan.GetFuncLocation(content)
 			uutil.ErrFatal(err)
 
-			for _, decl := range f.Decls {
-				if fn, ok := decl.(*ast.FuncDecl); ok {
-					func_name := fn.Name.Name
-					start_line := fset.Position(fn.Pos()).Line - 1
-					end_line := fset.Position(fn.End()).Line - 1
-					func_location := FuncLocation{FuncName: func_name, StartLine: start_line, EndLine: end_line}
-					if func_locations, exist := file_func_locations[file_path]; exist {
-						func_locations = append(func_locations, func_location)
-						file_func_locations[file_path] = func_locations
-					} else {
-						file_func_locations[file_path] = []FuncLocation{func_location}
-					}
-				}
-			}
+			file_func_locations[file_path] = func_locations
 		}
 		return file_func_locations, nil
 	} else {
@@ -273,10 +258,10 @@ func (ghop GithubOperation) GetPrePRFuncLocation(git_url string, file_diffs []Fi
 	}
 }
 
-func (ghop GithubOperation) GetPreCommitFuncLocation(git_url string, file_diffs []FileDiff) (map[string][]FuncLocation, error) {
+func (ghop GithubOperation) GetPreCommitFuncLocation(git_url string, file_diffs []FileDiff) (map[string][]gity.FuncLocation, error) {
 
-	file_func_locations := map[string][]FuncLocation{}
-	tokens := strings.Split(git_url, "\n")
+	file_func_locations := map[string][]gity.FuncLocation{}
+	tokens := strings.Split(git_url, "/")
 
 	// initialize authorization info
 	ctx, client := ghop.NewGithubClient()
@@ -289,10 +274,15 @@ func (ghop GithubOperation) GetPreCommitFuncLocation(git_url string, file_diffs 
 	// get the target commit
 	repo_commit, _, err := client.Repositories.GetCommit(ctx, owner, repo, commit_sha, nil)
 	uutil.ErrFatal(err)
+
 	if len(repo_commit.Parents) > 1 {
-		log.Logger.Infoln("WARNING: target commit has multiple parents.\n")
+		fmt.Printf("WARNING: target commit has %v parents.\n", len(repo_commit.Parents))
+		parents := repo_commit.Parents
+		for i := 0; i < len(repo_commit.Parents); i++ {
+			fmt.Printf("Parent_%v: %v\n", i, parents[i].GetSHA())
+		}
 	} else if len(repo_commit.Parents) == 0 {
-		return map[string][]FuncLocation{}, xerrors.Errorf("Bug: commit don't has the parents commit at GerPreCommitFuncLocation.\n")
+		return map[string][]gity.FuncLocation{}, xerrors.Errorf("Bug: commit don't has the parents commit at GerPreCommitFuncLocation.\n")
 	}
 
 	pre_commit_sha := repo_commit.Parents[0].GetSHA()
@@ -314,14 +304,14 @@ func (ghop GithubOperation) GetPreCommitFuncLocation(git_url string, file_diffs 
 		for _, decl := range f.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok {
 				func_name := fn.Name.Name
-				start_line := fset.Position(fn.Pos()).Line - 1
-				end_line := fset.Position(fn.End()).Line - 1
-				func_location := FuncLocation{FuncName: func_name, StartLine: start_line, EndLine: end_line}
+				start_line := fset.Position(fn.Pos()).Line
+				end_line := fset.Position(fn.End()).Line
+				func_location := gity.FuncLocation{FuncName: func_name, StartLine: start_line, EndLine: end_line}
 				if func_locations, exist := file_func_locations[file_path]; exist {
 					func_locations = append(func_locations, func_location)
 					file_func_locations[file_path] = func_locations
 				} else {
-					file_func_locations[file_path] = []FuncLocation{func_location}
+					file_func_locations[file_path] = []gity.FuncLocation{func_location}
 				}
 			}
 		}
